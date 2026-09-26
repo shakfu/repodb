@@ -653,16 +653,6 @@ class TestMain:
         assert run(db_path, "remove", "--owner", "a", "--all") == 1
         assert "'a': no projects for this owner" in capsys.readouterr().err
 
-    def test_listrepos_alias(self, db_path, capsys):
-        with GitRepoDB(db_path) as db:
-            db.add([("r", "https://github.com/a/r")])
-        with (
-            patch("sys.argv", ["/bin/listrepos.py"]),
-            patch("repodb.core.DB_PATH", db_path),
-        ):
-            assert main() == 0
-        assert capsys.readouterr().out.splitlines()[-1] == "r"
-
     def test_clone_from_db_grouped(self, remotes, db_path, tmp_path):
         with GitRepoDB(db_path) as db:
             db.add([(n, u) for (_, n), u in remotes.items()])

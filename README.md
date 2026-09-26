@@ -10,7 +10,7 @@ Each project is stored as `(owner, name, url)`, keyed by `(owner, name)`. The ow
 uv tool install git+https://github.com/shakfu/repodb
 ```
 
-This installs `repodb`, and `listrepos` as an alias for `repodb list`.
+This installs `repodb`.
 
 ## Usage
 

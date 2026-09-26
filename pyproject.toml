@@ -1,9 +1,6 @@
-
-
-
 [project]
 name = "repodb"
-version = "0.1.0"
+version = "0.1.1"
 description = "Keep a SQLite database of git project clone URLs, and clone from it"
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,7 +26,6 @@ classifiers = [
 
 [project.scripts]
 repodb = "repodb.core:main"
-listrepos = "repodb.core:main"
 
 [dependency-groups]
 dev = [

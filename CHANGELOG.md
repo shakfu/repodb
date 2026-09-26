@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Removed
+
+- The `listrepos` console script. It discarded its arguments, so `listrepos --owner X` listed every owner. Use `repodb list`, or a shell alias.
+
 ## [0.1.0]
 
 ### Added

@@ -20,8 +20,6 @@ Both forms are read back; group keys are ignored on read, since owner is
 derived from the URL. ``clone`` recreates each project as ``DEST/<name>``, or
 with ``--group`` ``DEST/<owner>/<name>``, and skips targets that already
 exist. The flat forms reject a name held by two owners.
-
-Installed as the ``repodb`` command; invoked as ``listrepos`` it runs ``list``.
 """
 
 from __future__ import annotations
@@ -622,8 +620,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p.add_argument("--owner", help="only this owner's projects")
 
-    if Path(sys.argv[0]).stem == "listrepos" and argv is None:
-        argv = ["list"]
     args = parser.parse_args(argv)
     handler: Handler = args.handler
     return handler(args, parser)
