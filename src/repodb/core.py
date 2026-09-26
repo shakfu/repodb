@@ -33,9 +33,10 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
-from typing_extensions import Self
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 DB_PATH = Path("~/.local/share/repodb/repos.sqlite").expanduser()
 SRC_DIR = Path("~/src").expanduser()

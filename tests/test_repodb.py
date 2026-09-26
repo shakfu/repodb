@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import subprocess
+import sys
 from contextlib import closing
 from unittest.mock import Mock, patch
 
@@ -793,3 +794,21 @@ def test_has_no_runtime_dependencies():
     from importlib.metadata import requires
 
     assert not (requires("repodb") or [])
+
+
+def test_imports_only_stdlib():
+    """Importing repodb must not need any module outside the stdlib."""
+    code = """
+import importlib.abc, sys
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        top = name.partition(".")[0]
+        if top != "repodb" and top not in sys.stdlib_module_names:
+            raise ImportError(f"non-stdlib import: {name}")
+sys.meta_path.insert(0, Block())
+import repodb.core
+"""
+    r = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert r.returncode == 0, r.stderr

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### Fixed
+
+- Importing `repodb` failed with `ModuleNotFoundError: typing_extensions` outside the dev environment. The import is only needed for type checking. mypy pulls it into the dev venv, so tests passed, and `test_has_no_runtime_dependencies` checks declared metadata, not imports. `test_imports_only_stdlib` now imports the package with non-stdlib modules blocked.
+
 ## [0.1.1]
 
 ### Removed
