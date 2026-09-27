@@ -36,3 +36,9 @@ cmake_install.cmake
 
 # OS
 .DS_Store
+
+# agentics
+.claude
+CLAUDE.md
+AGENTS.md
+REVIEW.md

@@ -44,7 +44,7 @@ format-check:
 
 # Type check with mypy
 typecheck:
-	@uv run mypy src/repodb
+	@uv run mypy src/repodb tests/
 
 # Run a full quality assurance check (non-mutating; mirrors CI)
 qa: lint-check format-check typecheck test

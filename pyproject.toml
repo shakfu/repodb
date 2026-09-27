@@ -1,7 +1,7 @@
 [project]
 name = "repodb"
-version = "0.1.2"
-description = "Keep a SQLite database of git project clone URLs, and clone from it"
+version = "0.2.0"
+description = "Keep a SQLite database of git project clone URLs; clone, compare and change the projects in bulk"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -25,7 +25,7 @@ classifiers = [
 ]
 
 [project.scripts]
-repodb = "repodb.core:main"
+repodb = "repodb.cli:main"
 
 [dependency-groups]
 dev = [
@@ -60,6 +60,6 @@ strict = true
 # Tests may omit annotations; their bodies are still type-checked. mypy
 # names tests/*.py by file stem (tests/ is not a package), so list each module.
 [[tool.mypy.overrides]]
-module = ["test_repodb"]
+module = ["conftest", "test_repodb", "test_apply", "test_library"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
