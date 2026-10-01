@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from conftest import git, run
+from repodb import apply
 from repodb.apply import Run, prepare, replace_in
 from repodb.core import GitRepoDB
 
@@ -103,6 +104,23 @@ class TestApply:
         marker.touch()
         assert run(db_path, "apply", "r") == 0  # resumes with the stored change
         assert {s.state for s in load(tmp_path, "r").repos.values()} == {"committed"}
+
+    def test_unexpected_error_keeps_other_results(self, stored, db_path, tmp_path):
+        real = apply.replace_in
+
+        def flaky(root, *a):
+            if root.name == "alpha":
+                raise OSError("disk full")
+            return real(root, *a)
+
+        with patch("repodb.apply.replace_in", flaky):
+            assert (
+                run(db_path, "apply", "s", *SHOUT, "--owner", "alice", "-j", "2") == 1
+            )
+        r = load(tmp_path, "s")
+        alpha, beta = r.repos["alice/alpha"], r.repos["alice/beta"]
+        assert (alpha.state, alpha.error) == ("failed", "OSError: disk full")
+        assert beta.state == "committed"
 
     def test_timeout(self, stored, db_path, tmp_path, capsys):
         args = ["apply", "t", "--exec", "sleep 30", "-m", "m", "-r", "beta"]
@@ -251,6 +269,22 @@ class TestPublish:
         assert run(db_path, "apply", "s", "--redo", "alpha") == 0
         assert run(db_path, "publish", "s", "--push-default") == 0
 
+    def test_unexpected_error_keeps_other_results(self, stored, db_path, tmp_path):
+        run(db_path, "apply", "s", *SHOUT, "--owner", "alice")
+        real = apply.git
+
+        def flaky(repo, *args):
+            if args[0] == "push" and repo.name == "alpha":
+                raise OSError("disk full")
+            return real(repo, *args)
+
+        with patch("repodb.apply.git", flaky):
+            assert run(db_path, "publish", "s", "--push-default", "-j", "2") == 1
+        r = load(tmp_path, "s")
+        alpha, beta = r.repos["alice/alpha"], r.repos["alice/beta"]
+        assert (alpha.state, alpha.error) == ("committed", "OSError: disk full")
+        assert beta.state == "published"
+
     def test_pr_needs_github(self, stored, db_path, tmp_path, capsys):
         run(db_path, "apply", "s", *SHOUT, "-r", "beta")
         with patch("repodb.cli.shutil.which", return_value="/bin/gh"):
@@ -310,6 +344,52 @@ class TestPublish:
                 "--draft",
             ]
         ]
+
+    def test_pr_already_open(self, github, db_path, tmp_path):
+        """A PR opened by an earlier publish whose result was not saved."""
+        run(db_path, "apply", "s", *SHOUT, "-r", "alpha")
+        fake = subprocess.run  # the github fixture's fake
+
+        def exists(cmd, *a, **kw):
+            if cmd[:3] == ["gh", "pr", "create"]:
+                github.append(cmd)
+                return subprocess.CompletedProcess(cmd, 1, "", "already exists")
+            return fake(cmd, *a, **kw)
+
+        with patch("repodb.apply.subprocess.run", exists):
+            assert run(db_path, "publish", "s") == 0
+        a = load(tmp_path, "s").repos["alice/alpha"]
+        assert (a.state, a.pr) == ("published", "https://github.com/alice/alpha/pull/7")
+        assert [c[2] for c in github] == ["create", "list"]
+        assert github[1][3:] == [
+            "--repo",
+            "alice/alpha",
+            "--base",
+            a.default_branch,
+            "--head",
+            "repodb/s",
+            "--json",
+            "url",
+            "-q",
+            ".[0].url",
+        ]
+
+    def test_pr_create_fails(self, github, db_path, tmp_path, capsys):
+        run(db_path, "apply", "s", *SHOUT, "-r", "alpha")
+        fake = subprocess.run  # the github fixture's fake
+
+        def fails(cmd, *a, **kw):
+            if cmd[:2] == ["gh", "pr"]:
+                out = "" if cmd[2] == "list" else "x"
+                return subprocess.CompletedProcess(cmd, cmd[2] != "list", out, "denied")
+            return fake(cmd, *a, **kw)
+
+        capsys.readouterr()
+        with patch("repodb.apply.subprocess.run", fails):
+            assert run(db_path, "publish", "s") == 1
+        assert "gh pr create: denied" in capsys.readouterr().err
+        a = load(tmp_path, "s").repos["alice/alpha"]
+        assert (a.state, a.pr) == ("committed", None)
 
     def test_workflow_scope_checked(self, github, db_path, tmp_path, capsys):
         cmd = "mkdir -p .github/workflows && echo x > .github/workflows/ci.yml"

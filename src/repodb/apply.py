@@ -325,7 +325,7 @@ def run_exec(
 def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> Repo:
     """Clone, change and commit one repo; return its new state."""
     d = root / "repos" / slug
-    log = root / "logs" / f"{slug.replace('/', '__')}.log"
+    logfile = root / "logs" / f"{slug.replace('/', '__')}.log"
     new = Repo(url=url)
     try:
         # run.json can be edited by hand; keep d inside root before rmtree.
@@ -334,7 +334,7 @@ def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> R
         if d.exists():
             shutil.rmtree(d)
         d.parent.mkdir(parents=True, exist_ok=True)
-        log.parent.mkdir(parents=True, exist_ok=True)
+        logfile.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
             [
                 "git",
@@ -355,7 +355,7 @@ def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> R
             raise Failed(f"git clone: {r.stderr.strip()}")
         new.default_branch = git(d, "symbolic-ref", "--short", "HEAD")
         new.base = git(d, "rev-parse", "HEAD")
-        with log.open("w") as out:
+        with logfile.open("w") as out:
             if run.exec is not None:
                 owner, name = slug.split("/")
                 env = os.environ | {
@@ -382,6 +382,9 @@ def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> R
         new.state = "committed"
     except Failed as e:
         new.state, new.error = "failed", str(e)
+    except Exception as e:  # e.g. OSError; one repo must not abort the run
+        log.exception("%s: unexpected error", slug)
+        new.state, new.error = "failed", f"{type(e).__name__}: {e}"
     return new
 
 
@@ -407,19 +410,32 @@ def publish_one(
         else:
             git(d, "push", "-q", "origin", run.branch)
             subject, _, body = run.message.partition("\n")
-            cmd = ["gh", "pr", "create"]
-            cmd += ["--repo", f"{owner_of(repo.url)}/{repo_of(repo.url)}"]
-            cmd += ["--base", default, "--head", run.branch]
+            where = ["--repo", f"{owner_of(repo.url)}/{repo_of(repo.url)}"]
+            where += ["--base", default, "--head", run.branch]
+            cmd = ["gh", "pr", "create", *where]
             cmd += ["--title", subject, "--body", body.strip()]
             if draft:
                 cmd.append("--draft")
             r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, check=False)
             if r.returncode:
-                raise Failed(f"gh pr create: {r.stderr.strip()}")
+                # An earlier publish may have opened the PR but not recorded it.
+                found = subprocess.run(
+                    ["gh", "pr", "list", *where, "--json", "url", "-q", ".[0].url"],
+                    cwd=d,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if found.returncode or not found.stdout.strip():
+                    raise Failed(f"gh pr create: {r.stderr.strip()}")
+                r = found
             new.pr = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else None
         new.state = "published"
     except Failed as e:
         new.error = str(e)
+    except Exception as e:  # e.g. gh not installed, after the push
+        log.exception("%s: unexpected error", slug)
+        new.error = f"{type(e).__name__}: {e}"
     return new
 
 
@@ -435,7 +451,7 @@ def parallel(
         futures = {pool.submit(work, s): s for s in slugs}
         for f in as_completed(futures):
             done(futures[f], f.result())
-    except KeyboardInterrupt:
+    except BaseException:  # Ctrl-C, or an error in *done*
         pool.shutdown(cancel_futures=True)
         raise
     pool.shutdown()

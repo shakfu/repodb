@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `apply` and `publish`: one repo's unexpected error, such as an `OSError` or a missing `gh`, no longer aborts the run. Before, it stopped result collection, so repos already finished, possibly already pushed, were not saved to `run.json`, and queued work kept running. Now the error goes into that repo's state as `failed` (apply) or `committed` with the error (publish), and the traceback is logged.
+
+- `publish`: a retry no longer stays `committed` when an earlier publish opened the PR but did not record it, for example after a lost `gh` response. `gh pr create` then fails because the PR exists. On that failure, `publish` now records the open PR for the run's branch. The lookup runs only after a failure, so the normal path makes no extra `gh` call.
+
 ## [0.2.0]
 
 ### Added

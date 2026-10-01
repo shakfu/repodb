@@ -165,7 +165,7 @@ Per repo:
 
    - `git push origin BRANCH`. If the remote branch exists at another commit, fail; `--force-with-lease` is not the default.
 
-   - `gh pr create --base DEFAULT --head BRANCH --title SUBJECT --body BODY [--draft]`. Record the PR url.
+   - `gh pr create --base DEFAULT --head BRANCH --title SUBJECT --body BODY [--draft]`. Record the PR url. If creation fails, record an open PR for the same repo, base and head, so a retry after a lost response does not stay stuck.
 
 3. `--push-default`: `git push origin BRANCH:DEFAULT`. Branch protection or a moved branch rejects it; record the error.
 
