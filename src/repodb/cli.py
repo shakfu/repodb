@@ -27,7 +27,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from repodb import apply as ap
@@ -416,6 +417,28 @@ def load_run(
         raise SystemExit(f"{root / 'run.json'}: unreadable: {e}") from None
 
 
+@contextmanager
+def hold(
+    args: argparse.Namespace, parser: argparse.ArgumentParser, create: bool = False
+) -> Iterator[Path]:
+    """Lock run ``args.run`` and yield its directory; exit 1 if it is locked.
+
+    Without *create*, a missing run is not locked, so `load_run` reports it.
+    """
+    try:
+        ap.check_run_name(args.run)
+    except ValueError as e:
+        parser.error(str(e))
+    root = run_root(args)
+    with ExitStack() as stack:
+        if create or root.is_dir():
+            try:
+                stack.enter_context(ap.locked(root))
+            except ap.Locked as e:
+                raise SystemExit(str(e)) from None
+        yield root
+
+
 def detail(repo: ap.Repo) -> str:
     """What happened to *repo*, for review and progress lines."""
     if repo.state == "committed":
@@ -444,70 +467,75 @@ def summary(run: ap.Run) -> str:
 
 def cmd_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     try:
-        ap.check_run_name(args.run)
         ap.check_change(args.exec, args.replace, args.glob or [])
     except ValueError as e:
         parser.error(str(e))
-    root = run_root(args)
-    exists = (root / "run.json").exists()
-    if exists:
-        run, _ = load_run(args, parser)
-        if args.branch and args.branch != run.branch:
-            parser.error(
-                f"run {run.name!r} uses branch {run.branch!r}; it is fixed per run"
-            )
-        if args.exec is not None or args.replace:
-            change = (args.exec, args.replace, args.glob or [])
-        else:
-            change = (run.exec, run.replace, run.glob)
-        message = args.message or run.message
-        if (*change, message) != run.change():
-            if args.redo is None:
+    with hold(args, parser, create=True) as root:
+        exists = (root / "run.json").exists()
+        if exists:
+            run, _ = load_run(args, parser)
+            if args.branch and args.branch != run.branch:
                 parser.error(
-                    f"the change or message differs from run {run.name!r};"
-                    " add --redo to apply it"
+                    f"run {run.name!r} uses branch {run.branch!r}; it is fixed per run"
                 )
-            run.set_change(message, *change)
-    else:
-        if args.exec is None and not args.replace:
-            parser.error("a new run needs --exec or --replace")
-        if not args.message:
-            parser.error("a new run needs -m MESSAGE")
-        run = ap.Run.create(
-            args.run,
-            args.message,
-            args.exec,
-            args.replace,
-            args.glob or [],
-            args.branch,
-        )
-    if args.repo or args.set_name or args.topic or args.owner or args.all:
-        with open_db(args) as db:
+            if args.exec is not None or args.replace:
+                change = (args.exec, args.replace, args.glob or [])
+            else:
+                change = (run.exec, run.replace, run.glob)
+            message = args.message or run.message
+            if (*change, message) != run.change():
+                if args.redo is None:
+                    parser.error(
+                        f"the change or message differs from run {run.name!r};"
+                        " add --redo to apply it"
+                    )
+                run.set_change(message, *change)
+        else:
+            if args.exec is None and not args.replace:
+                parser.error("a new run needs --exec or --replace")
+            if not args.message:
+                parser.error("a new run needs -m MESSAGE")
+            run = ap.Run.create(
+                args.run,
+                args.message,
+                args.exec,
+                args.replace,
+                args.glob or [],
+                args.branch,
+            )
+        if args.repo or args.set_name or args.topic or args.owner or args.all:
+            with open_db(args) as db:
+                try:
+                    rows = (
+                        [db.find(s) for s in args.repo]
+                        if args.repo
+                        else select(db, args)
+                    )
+                except ValueError as e:
+                    print(e, file=sys.stderr)
+                    return 1
+            if (args.topic or args.set_name) and not rows:
+                return no_match(args)
+            if not rows:
+                owned = f" owned by {args.owner!r}" if args.owner else ""
+                print(f"no projects{owned}; nothing to apply", file=sys.stderr)
+                return 1
             try:
-                rows = (
-                    [db.find(s) for s in args.repo] if args.repo else select(db, args)
-                )
+                run.add(rows)
             except ValueError as e:
                 print(e, file=sys.stderr)
                 return 1
-        if not rows:
-            return no_match(args) if args.topic or args.set_name else 1
-        try:
-            run.add(rows)
-        except ValueError as e:
-            print(e, file=sys.stderr)
-            return 1
-    elif not exists:
-        parser.error("select repos with -r, -s, -t, --owner or --all")
-    if args.redo is not None:
-        try:
-            run.redo(run.resolve(args.redo) if args.redo else None)
-        except ValueError as e:
-            print(e, file=sys.stderr)
-            return 1
-    ap.apply_run(run, root, args.jobs, args.timeout, on_done=report_line)
-    print(f"run {run.name}: {summary(run)}; review with 'repodb review {run.name}'")
-    return 1 if run.counts().get("failed") else 0
+        elif not exists:
+            parser.error("select repos with -r, -s, -t, --owner or --all")
+        if args.redo is not None:
+            try:
+                run.redo(run.resolve(args.redo) if args.redo else None)
+            except ValueError as e:
+                print(e, file=sys.stderr)
+                return 1
+        ap.apply_run(run, root, args.jobs, args.timeout, on_done=report_line)
+        print(f"run {run.name}: {summary(run)}; review with 'repodb review {run.name}'")
+        return 1 if run.counts().get("failed") else 0
 
 
 def cmd_review(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -531,37 +559,40 @@ def cmd_review(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
 
 
 def cmd_publish(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    run, root = load_run(args, parser)
-    try:
-        slugs = run.resolve(args.specs) if args.specs else list(run.repos)
-    except ValueError as e:
-        print(e, file=sys.stderr)
-        return 1
-    todo = [s for s in slugs if run.repos[s].state == "committed"]
-    if not todo:
-        print(f"run {run.name}: nothing to publish ({summary(run)})", file=sys.stderr)
-        return 0
-    gh = shutil.which("gh")
-    if not args.push_default and gh is None:
-        parser.error(
-            "PR mode needs the gh CLI: https://cli.github.com; or --push-default"
+    with hold(args, parser):
+        run, root = load_run(args, parser)
+        try:
+            slugs = run.resolve(args.specs) if args.specs else list(run.repos)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
+        todo = [s for s in slugs if run.repos[s].state == "committed"]
+        if not todo:
+            print(
+                f"run {run.name}: nothing to publish ({summary(run)})", file=sys.stderr
+            )
+            return 0
+        gh = shutil.which("gh")
+        if not args.push_default and gh is None:
+            parser.error(
+                "PR mode needs the gh CLI: https://cli.github.com; or --push-default"
+            )
+        if (
+            gh is not None
+            and ap.needs_workflow_scope(run, todo)
+            and not ap.has_workflow_scope()
+        ):
+            print(
+                "changes touch .github/workflows/ but the gh token lacks the 'workflow'"
+                " scope; run 'gh auth refresh -s workflow'",
+                file=sys.stderr,
+            )
+            return 1
+        tried = ap.publish_run(
+            run, root, todo, args.push_default, args.draft, args.jobs, report_line
         )
-    if (
-        gh is not None
-        and ap.needs_workflow_scope(run, todo)
-        and not ap.has_workflow_scope()
-    ):
-        print(
-            "changes touch .github/workflows/ but the gh token lacks the 'workflow'"
-            " scope; run 'gh auth refresh -s workflow'",
-            file=sys.stderr,
-        )
-        return 1
-    tried = ap.publish_run(
-        run, root, todo, args.push_default, args.draft, args.jobs, report_line
-    )
-    print(f"run {run.name}: {summary(run)}")
-    return 1 if any(run.repos[s].error for s in tried) else 0
+        print(f"run {run.name}: {summary(run)}")
+        return 1 if any(run.repos[s].error for s in tried) else 0
 
 
 def cmd_runs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -573,11 +604,13 @@ def cmd_runs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             text = summary(run) if isinstance(run, ap.Run) else f"unreadable: {run}"
             print(f"{name}  {text}")
         return 0
-    run, root = load_run(args, parser)
     if args.discard:
-        ap.discard(root)
+        with hold(args, parser):
+            run, root = load_run(args, parser)
+            ap.discard(root)
         print(f"discarded run {run.name} ({summary(run)})")
         return 0
+    run, root = load_run(args, parser)
     print(summary(run))
     return 0
 

@@ -171,6 +171,14 @@ class TestApply:
         assert run(db_path, "apply", "r", *SHOUT, "-r", "nope") == 1
         assert run(db_path, "apply", "r", *SHOUT, "-s", "nope") == 1
         assert "no projects in set 'nope'" in capsys.readouterr().err
+        assert run(db_path, "apply", "r", *SHOUT, "--owner", "nobody") == 1
+        assert "no projects owned by 'nobody'" in capsys.readouterr().err
+        assert not (runs(tmp_path) / "r").exists()
+
+    def test_empty_database(self, db_path, tmp_path, capsys):
+        assert run(db_path, "apply", "r", *SHOUT, "--all") == 1
+        assert "no projects; nothing to apply" in capsys.readouterr().err
+        assert not (runs(tmp_path) / "r").exists()
 
 
 class TestRunAdd:
@@ -431,3 +439,35 @@ class TestRuns:
         assert run(db_path, "apply", "one", *SHOUT, "-r", "beta", "--workdir", w) == 0
         assert Run.load(w / "one").repos["alice/beta"].state == "committed"
         assert not runs(tmp_path).exists()
+
+    def test_format_version(self, tmp_path):
+        Run.create("r", "m", exec="true").save(tmp_path)
+        manifest = tmp_path / "run.json"
+        data = json.loads(manifest.read_text())
+        assert data["version"] == apply.RUN_VERSION
+        data["later"] = 1
+        data["repos"] = {"a/b": {"url": "u", "later": 1}}
+        manifest.write_text(json.dumps(data))
+        assert Run.load(tmp_path).repos["a/b"].url == "u"
+        data["version"] = apply.RUN_VERSION + 1
+        manifest.write_text(json.dumps(data))
+        with pytest.raises(ValueError, match="newer"):
+            Run.load(tmp_path)
+
+    def test_lock(self, stored, db_path, tmp_path):
+        run(db_path, "apply", "one", *SHOUT, "-r", "beta")
+        root = runs(tmp_path) / "one"
+        with apply.locked(root):
+            for args in [
+                ["apply", "one", "--redo"],
+                ["publish", "one", "--push-default"],
+                ["runs", "one", "--discard"],
+            ]:
+                with pytest.raises(SystemExit) as e:
+                    run(db_path, *args)
+                assert "in use by another process" in str(e.value.code)
+        assert run(db_path, "runs", "one", "--discard") == 0
+        assert not root.exists()
+        with pytest.raises(SystemExit):
+            run(db_path, "publish", "nope")
+        assert not (runs(tmp_path) / "nope").exists()

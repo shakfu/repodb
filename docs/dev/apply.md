@@ -90,6 +90,7 @@ commands:
 `~/.local/share/repodb/runs/RUN/`, next to the default database; `--workdir` overrides.
 
 ```
+runs/.bump-checkout.lock    # held by apply, publish and runs --discard
 runs/bump-checkout/
   run.json                  # manifest
   repos/OWNER/NAME/         # shallow clone
@@ -100,6 +101,7 @@ runs/bump-checkout/
 
 ```json
 {
+  "version": 1,
   "name": "bump-checkout",
   "message": "Bump actions/checkout to v4",
   "branch": "repodb/bump-checkout",
@@ -122,6 +124,10 @@ runs/bump-checkout/
 ```
 
 The main thread writes the manifest after each repo finishes, to a temporary file then `os.replace`. A crash or Ctrl-C keeps finished repos.
+
+`version` is raised only on a change older code would misread; such a run is refused as unreadable. Unknown keys are ignored, so an added field needs no bump.
+
+The lock is a non-blocking `flock` (`msvcrt.locking` on Windows), held from loading the manifest to its last save. A second `apply`, `publish` or `runs --discard` on the same run exits instead of interleaving writes. The OS releases it when the process dies, so a crash leaves no stale lock. The file sits beside the run directory, not in it: a failed new `apply` creates no directory, and `--discard` can delete the directory while holding the lock, which Windows refuses for an open file. It is never deleted, since unlinking a lock file another process has open lets two processes hold it.
 
 ## Per-repo states
 
@@ -230,3 +236,5 @@ The `remotes` fixture already maps `https://git.example.com/OWNER/NAME.git` to l
 - `--exec` runs in its own session, so `--timeout` kills the command's children too. Ctrl-C does not reach them; they finish or time out.
 
 - Commits use your git identity. Set `GIT_AUTHOR_*`/`GIT_COMMITTER_*` or `includeIf` config if these repos need another one.
+
+- Commits also use your signing config. With `commit.gpgsign = true`, each repo's commit signs separately, so a key without a cached passphrase prompts once per repo. With `-j N`, N prompts can be pending at once. Cache the passphrase first, e.g. with `gpg-agent`, or disable signing for the run: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false repodb apply ...`.

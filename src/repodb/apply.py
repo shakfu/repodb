@@ -4,14 +4,15 @@ A run is a named change (a shell command, or a regex substitution over files)
 and the repos it applies to. It is kept in a directory, by default
 ``runs/RUN/`` next to the database: ``run.json``, a shallow clone per repo
 under ``repos/OWNER/NAME``, and a log per repo. Calling `apply_run` or
-`publish_run` again resumes it.
+`publish_run` again resumes it. `locked` keeps other processes out.
 
     run = Run.create("bump", "Bump checkout", replace=[r"checkout@v\\d+", "checkout@v5"],
                      glob=[".github/workflows/*.yml"])
     run.add(db.rows(set_name="agents"))
     root = runs_dir(db.db_path) / run.name
-    apply_run(run, root, jobs=8)      # review run.repos, then
-    publish_run(run, root)
+    with locked(root):
+        apply_run(run, root, jobs=8)  # review run.repos, then
+        publish_run(run, root)
 
 Design and failure modes: ``docs/dev/apply.md``. The command-line interface
 is `repodb.cli`.
@@ -27,11 +28,13 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Callable, Iterable, Sequence
+import sys
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from repodb.core import Row, host_of, owner_of, repo_of, url_key, valid_name
 
@@ -39,12 +42,63 @@ log = logging.getLogger(__name__)
 
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # a path and branch component
 STATES = ("committed", "published", "unchanged", "failed", "selected")
+RUN_VERSION = 1  # of run.json; raise on a change older code would misread
 
 OnDone = Callable[[str, "Repo"], None]
 
 
 class Failed(Exception):
     """A step failed for one repo; the message is recorded in the run."""
+
+
+class Locked(Exception):
+    """Another process holds the run's lock."""
+
+
+def known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
+    """Return the items of *data* that are fields of dataclass *cls*."""
+    names = {f.name for f in dataclasses.fields(cls)}
+    return {k: v for k, v in data.items() if k in names}
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def try_lock(f: IO[str]) -> bool:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+else:
+    import fcntl
+
+    def try_lock(f: IO[str]) -> bool:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+
+@contextmanager
+def locked(root: Path) -> Iterator[None]:
+    """Hold the lock of run directory *root*, ``.NAME.lock`` beside it.
+
+    Hold it from `Run.load` to the last `Run.save`, so two processes cannot
+    interleave changes to one run. The lock is outside *root*, so `discard`
+    can remove *root* while holding it.
+
+    Raises:
+        Locked: if another process holds it.
+    """
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with (root.parent / f".{root.name}.lock").open("a+") as f:
+        f.seek(0)  # msvcrt locks from the file position
+        if not try_lock(f):
+            raise Locked(f"run {root.name!r} is in use by another process")
+        yield  # the lock is released when f closes
 
 
 def check_run_name(name: str) -> None:
@@ -150,17 +204,21 @@ class Run:
 
         Raises:
             FileNotFoundError: if there is no run in *root*.
-            ValueError, TypeError, KeyError: if ``run.json`` is malformed.
+            ValueError, TypeError, KeyError: if ``run.json`` is malformed or
+                from a newer format. Unknown keys are ignored.
         """
         data = json.loads((root / "run.json").read_text())
-        data["repos"] = {k: Repo(**v) for k, v in data["repos"].items()}
-        return cls(**data)
+        if (version := data.get("version", 1)) > RUN_VERSION:
+            raise ValueError(f"run.json version {version} is newer than {RUN_VERSION}")
+        repos = {k: Repo(**known(Repo, v)) for k, v in data["repos"].items()}
+        return cls(**known(cls, data) | {"repos": repos})
 
     def save(self, root: Path) -> None:
         """Write ``run.json`` atomically, so a crash keeps the previous state."""
         root.mkdir(parents=True, exist_ok=True)
         tmp = root / "run.json.tmp"
-        tmp.write_text(json.dumps(asdict(self), indent=2) + "\n")
+        data = {"version": RUN_VERSION} | asdict(self)
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, root / "run.json")
 
     def change(self) -> tuple[object, ...]:

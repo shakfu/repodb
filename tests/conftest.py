@@ -13,6 +13,13 @@ def git(*args: str) -> None:
     subprocess.run(["git", *args], check=True, capture_output=True)
 
 
+@pytest.fixture(autouse=True)
+def no_user_git_config(monkeypatch):
+    """Ignore the user's git config, e.g. ``commit.gpgsign`` or ``url.insteadOf``."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+
 @pytest.fixture
 def remotes(tmp_path, monkeypatch):
     """Bare repos alice/alpha, alice/beta, bob/alpha, reachable at HOST/<owner>/<name>.git.

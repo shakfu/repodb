@@ -4,23 +4,17 @@
 
 ## High
 
-- [x] H1. CI type check fails. CI runs `mypy src/repodb tests/`; `make typecheck` runs `mypy src/repodb`. Make the target match CI, then fix the 3 `[index]` errors in `tests/test_repodb.py:771`, `:784` and `tests/test_library.py:82` (`dict[str, object]` values indexed).
-
-- [x] H2. `apply.prepare` can `rmtree` a directory outside the run directory. Owner and name are not validated (`apply.py:305-310`). Validate both with `valid_name` in `Run.add`, and reject invalid names in `GitRepoDB.add`.
-
-- [x] H3. One repo stored under two names (`scan` dir name vs `github` repo name) is cloned and changed twice. De-duplicate by normalised url in `Run.add` and `clone`. Root cause is M6.
-
 ## Medium
 
-- [ ] M1. A non-`Failed` exception in one repo aborts `apply.parallel` and loses finished, uncollected results. Catch `Exception` per repo in the worker and record it as `failed`.
+- [x] M1. A non-`Failed` exception in one repo aborts `apply.parallel` and loses finished, uncollected results. Catch `Exception` per repo in the worker and record it as `failed`.
 
-- [ ] M2. Tests depend on global git config: `commit.gpgsign = true` gives 52 errors; `url.insteadOf` gives 2 failures. Set `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` to `/dev/null` in an autouse fixture in `tests/conftest.py`. Document the `commit.gpgsign` prompt per parallel commit in `docs/dev/apply.md`.
+- [x] M2. Tests depend on global git config: `commit.gpgsign = true` gives 52 errors; `url.insteadOf` gives 2 failures. Set `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` to `/dev/null` in an autouse fixture in `tests/conftest.py`. Document the `commit.gpgsign` prompt per parallel commit in `docs/dev/apply.md`.
 
-- [ ] M3. `apply` exits 1 with no message on an empty selection via `--all` or `--owner` (`cli.py:484-485`).
+- [x] M3. `apply` exits 1 with no message on an empty selection via `--all` or `--owner` (`cli.py:484-485`).
 
-- [ ] M4. Ctrl-C does not stop `clone -j N`: `with ThreadPoolExecutor` waits for all submitted tasks (`core.py:766`). Share `apply.parallel`'s `cancel_futures=True` handling.
+- [x] M4. Ctrl-C does not stop `clone -j N`: `with ThreadPoolExecutor` waits for all submitted tasks (`core.py:766`). Share `apply.parallel`'s `cancel_futures=True` handling. Not reproduced: `Executor.map`'s iterator cancels queued futures when it raises, and Ctrl-C is raised inside it (checked on 3.10, 3.12, 3.14). Regression test added.
 
-- [ ] M5. Runs have no lock and no format version. Add a lock file in the run directory, a `version` field in `run.json`, and ignore unknown keys in `Run.load`.
+- [x] M5. Runs have no lock and no format version. Add a lock file beside the run directory (in it, Windows cannot delete it during `--discard`), a `version` field in `run.json`, and ignore unknown keys in `Run.load`.
 
 - [x] M6. Decide project identity before adding features. Key is `(owner, name)`; identity is the url. Alternative: key on normalised `host/owner/repo`, with the directory name as an attribute. Schema change; current schema refuses migration.
 

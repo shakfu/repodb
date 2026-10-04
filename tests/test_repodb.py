@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1472,6 +1473,23 @@ class TestParallelClone:
             db.add([(n, u) for (_, n), u in remotes.items()])
         assert run(db_path, "clone", "-g", "-j", "3", tmp_path / "d") == 0
         assert (tmp_path / "d" / "bob" / "alpha" / "README").exists()
+
+    def test_interrupt_cancels_queued_clones(self, tmp_path):
+        # Executor.map cancels queued work when its iterator raises.
+        calls = []
+
+        def interrupted(*args, **kwargs):
+            calls.append(args)
+            time.sleep(0.05)
+            raise KeyboardInterrupt
+
+        rows = [("o", f"r{i}", f"{HOST}o/r{i}.git") for i in range(20)]
+        with (
+            patch("repodb.core.subprocess.run", side_effect=interrupted),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            clone(rows, tmp_path / "d", jobs=2)
+        assert len(calls) < len(rows)
 
     @pytest.mark.parametrize("jobs", ["0", "-1", "x"])
     def test_rejects_bad_jobs(self, db_path, tmp_path, jobs):

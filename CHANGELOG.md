@@ -6,7 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Runs have a lock and a format version. `apply`, `publish` and `runs --discard` hold `runs/.RUN.lock`; a second process on the same run exits with a message. Before, two processes each saved `run.json` from their own copy, so one silently dropped the other's results. `run.json` gains `"version": 1`. A newer version is refused, and unknown keys are ignored, so an added field stays readable by older releases.
+
 ### Fixed
+
+- `apply --all` or `--owner` that selects nothing now says so. Before, it exited 1 with no message.
+
+- Tests no longer read the user's git config. `commit.gpgsign = true` or a `url.insteadOf` rewrite made them fail.
 
 - `apply` and `publish`: one repo's unexpected error, such as an `OSError` or a missing `gh`, no longer aborts the run. Before, it stopped result collection, so repos already finished, possibly already pushed, were not saved to `run.json`, and queued work kept running. Now the error goes into that repo's state as `failed` (apply) or `committed` with the error (publish), and the traceback is logged.
 
