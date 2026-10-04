@@ -21,6 +21,7 @@ is `repodb.cli`.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import IO, Any
 
@@ -42,6 +44,7 @@ log = logging.getLogger(__name__)
 
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # a path and branch component
 STATES = ("committed", "published", "unchanged", "failed", "selected")
+SCRIPT = "script"  # a run's copy of its script, in the run directory
 RUN_VERSION = 1  # of run.json; raise on a change older code would misread
 
 OnDone = Callable[[str, "Repo"], None]
@@ -109,6 +112,22 @@ def check_run_name(name: str) -> None:
         )
 
 
+def check_branch(name: str) -> None:
+    """Raises ValueError unless git accepts *name* as a new branch name."""
+    # "@{-N}" would expand to a previous branch of the current directory's repo.
+    if (
+        "@{" not in name
+        and subprocess.run(
+            ["git", "check-ref-format", "--branch", name],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    ):
+        return
+    raise ValueError(f"invalid branch name {name!r}")
+
+
 def check_slug(slug: str) -> bool:
     """True if *slug* is ``OWNER/NAME``, each a single path component."""
     owner, _, name = slug.partition("/")
@@ -116,11 +135,15 @@ def check_slug(slug: str) -> bool:
 
 
 def check_change(
-    exec: str | None, replace: Sequence[str] | None, glob: Sequence[str]
+    exec: str | None,
+    replace: Sequence[str] | None,
+    glob: Sequence[str],
+    script: str | None = None,
 ) -> None:
-    """Raises ValueError if the change is not one valid command or substitution."""
-    if exec is not None and replace:
-        raise ValueError("give exec or replace, not both")
+    """Raises ValueError unless the change is at most one valid command,
+    substitution or script digest."""
+    if sum((exec is not None, bool(replace), script is not None)) > 1:
+        raise ValueError("give one of exec, replace or script")
     if bool(replace) != bool(glob):
         raise ValueError("replace and glob go together")
     for g in glob:
@@ -138,6 +161,30 @@ def check_change(
 def runs_dir(db_path: Path) -> Path:
     """Return the default directory holding runs, next to the database."""
     return Path(db_path).parent / "runs"
+
+
+def check_script(data: bytes) -> str:
+    """Return the sha256 of script *data*.
+
+    Raises:
+        ValueError: if it has no ``#!`` line, so it could not be executed.
+    """
+    if not data.startswith(b"#!"):
+        raise ValueError("a script needs a #! line, e.g. #!/bin/sh")
+    return hashlib.sha256(data).hexdigest()
+
+
+def install_script(root: Path, data: bytes) -> None:
+    """Write script *data* to run *root* as the executable `SCRIPT`."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / SCRIPT
+    path.write_bytes(data)
+    path.chmod(0o755)
+
+
+def template(kind: str) -> str:
+    """Return the starter script for `apply_run`, *kind* ``sh`` or ``py``."""
+    return (resources.files("repodb") / "templates" / f"change.{kind}").read_text()
 
 
 @dataclass
@@ -166,6 +213,7 @@ class Run:
     exec: str | None = None
     replace: list[str] | None = None  # [pattern, replacement]
     glob: list[str] = field(default_factory=list)
+    script: str | None = None  # sha256 of SCRIPT in the run directory
     repos: dict[str, Repo] = field(default_factory=dict)  # OWNER/NAME -> Repo
 
     @classmethod
@@ -177,25 +225,32 @@ class Run:
         replace: Sequence[str] | None = None,
         glob: Sequence[str] = (),
         branch: str | None = None,
+        script: str | None = None,
     ) -> Run:
         """Return a new run; its branch defaults to ``repodb/NAME``.
 
+        *script* is the `check_script` digest of a script `install_script`
+        puts in the run directory before `apply_run`.
+
         Raises:
-            ValueError: on an invalid name, change or empty message.
+            ValueError: on an invalid name, branch, change or empty message.
         """
         check_run_name(name)
-        check_change(exec, replace, glob)
-        if exec is None and not replace:
-            raise ValueError("a run needs exec or replace")
+        check_change(exec, replace, glob, script)
+        branch = branch or f"repodb/{name}"
+        check_branch(branch)
+        if exec is None and not replace and script is None:
+            raise ValueError("a run needs exec, replace or script")
         if not message:
             raise ValueError("a run needs a commit message")
         return cls(
             name,
             message,
-            branch or f"repodb/{name}",
+            branch,
             exec,
             list(replace) if replace else None,
             list(glob),
+            script,
         )
 
     @classmethod
@@ -222,7 +277,7 @@ class Run:
         os.replace(tmp, root / "run.json")
 
     def change(self) -> tuple[object, ...]:
-        return (self.exec, self.replace, self.glob, self.message)
+        return (self.exec, self.replace, self.glob, self.script, self.message)
 
     def set_change(
         self,
@@ -230,14 +285,15 @@ class Run:
         exec: str | None = None,
         replace: Sequence[str] | None = None,
         glob: Sequence[str] = (),
+        script: str | None = None,
     ) -> None:
         """Replace the change and message; `redo` the repos it should apply to.
 
         Raises:
             ValueError: on an invalid change.
         """
-        check_change(exec, replace, glob)
-        self.exec, self.message = exec, message
+        check_change(exec, replace, glob, script)
+        self.exec, self.script, self.message = exec, script, message
         self.replace, self.glob = (list(replace) if replace else None), list(glob)
 
     def add(self, rows: Iterable[Row]) -> list[str]:
@@ -353,9 +409,13 @@ def replace_in(
 
 
 def run_exec(
-    cmd: str, cwd: Path, env: dict[str, str], out: IO[str], timeout: int | None
+    cmd: str | list[str],
+    cwd: Path,
+    env: dict[str, str],
+    out: IO[str],
+    timeout: int | None,
 ) -> None:
-    """Run *cmd* through the shell in *cwd*, output to *out*.
+    """Run *cmd* in *cwd*, a string through the shell, output to *out*.
 
     Raises:
         Failed: on a non-zero exit or timeout.
@@ -363,7 +423,7 @@ def run_exec(
     # A new session, so a timeout can kill the command's children too.
     proc = subprocess.Popen(
         cmd,
-        shell=True,
+        shell=isinstance(cmd, str),
         cwd=cwd,
         env=env,
         stdout=out,
@@ -414,7 +474,7 @@ def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> R
         new.default_branch = git(d, "symbolic-ref", "--short", "HEAD")
         new.base = git(d, "rev-parse", "HEAD")
         with logfile.open("w") as out:
-            if run.exec is not None:
+            if run.exec is not None or run.script is not None:
                 owner, name = slug.split("/")
                 env = os.environ | {
                     "REPODB_RUN": run.name,
@@ -422,7 +482,13 @@ def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> R
                     "REPODB_NAME": name,
                     "REPODB_URL": url,
                 }
-                run_exec(run.exec, d, env, out, timeout)
+                # Absolute: the script runs with the clone as cwd.
+                cmd = (
+                    run.exec
+                    if run.exec is not None
+                    else [str((root / SCRIPT).resolve())]
+                )
+                run_exec(cmd, d, env, out, timeout)
             elif run.replace is not None:
                 pattern, repl = run.replace
                 new.matches = replace_in(d, re.compile(pattern), repl, run.glob)
@@ -571,11 +637,18 @@ def needs_workflow_scope(run: Run, slugs: Iterable[str]) -> bool:
 
 
 def has_workflow_scope() -> bool:
-    """True if ``gh auth status`` lists the ``workflow`` scope."""
+    """True if gh's active github.com account has the ``workflow`` scope."""
+    cmd = ["gh", "auth", "status", "--hostname", "github.com", "--active"]
     r = subprocess.run(
-        ["gh", "auth", "status"], capture_output=True, text=True, check=False
+        [*cmd, "--json", "hosts"], capture_output=True, text=True, check=False
     )
-    return "workflow" in r.stdout + r.stderr
+    try:
+        accounts = json.loads(r.stdout)["hosts"]["github.com"]
+        scopes = {s.strip() for a in accounts for s in a["scopes"].split(",")}
+    except (ValueError, KeyError, TypeError, AttributeError):  # gh without --json
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return "'workflow'" in r.stdout + r.stderr
+    return "workflow" in scopes
 
 
 def publish_run(

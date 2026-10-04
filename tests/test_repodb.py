@@ -195,6 +195,34 @@ class TestInfo:
         # Every value starts in the same column.
         assert {len(line) - len(line.split(":", 1)[1].lstrip()) for line in out} == {14}
 
+    @pytest.mark.parametrize(
+        "args", [["list", "stray"], ["publish", "r", "--bogus"], ["set", "-x", "a"]]
+    )
+    def test_rejects_unrecognized_arguments(self, db_path, capsys, args):
+        with pytest.raises(SystemExit) as e:
+            run(db_path, *args)
+        assert e.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["list"],
+            ["export", "-o", "-"],
+            ["topics"],
+            ["status", "."],
+            ["set"],
+            ["remove", "a/b"],
+            ["clone", "d"],
+            ["apply", "r", "--exec", "true", "-m", "m", "--all"],
+        ],
+    )
+    def test_read_commands_need_a_database(self, db_path, capsys, args):
+        with pytest.raises(SystemExit) as e:
+            run(db_path, *args)
+        assert f"no database at {db_path}" in str(e.value.code)
+        assert not db_path.exists()
+
     def test_main_missing_does_not_create(self, db_path, capsys):
         assert run(db_path, "info") == 1
         assert f"no database at {db_path}" in capsys.readouterr().err
@@ -754,6 +782,12 @@ class TestMain:
         with pytest.raises(SystemExit):
             run(db_path, "scan", tmp_path / "missing")
 
+    def test_export_unwritable(self, src, db_path, tmp_path, capsys):
+        run(db_path, "scan", src)
+        assert run(db_path, "export", "-o", tmp_path / "missing" / "p.json") == 1
+        err = capsys.readouterr().err
+        assert "cannot write" in err and "No such file or directory" in err
+
     def test_export_owner_filter(self, src, db_path, tmp_path):
         out = tmp_path / "p.json"
         run(db_path, "scan", src)
@@ -891,6 +925,7 @@ class TestMain:
 
     @pytest.mark.parametrize("flags", [[], ["-g"]])
     def test_list_empty(self, db_path, capsys, flags):
+        GitRepoDB(db_path).close()
         assert run(db_path, "list", *flags) == 1
         assert "no projects" in capsys.readouterr().err
 
@@ -1542,6 +1577,11 @@ class TestGithub:
         with patch("repodb.core.subprocess.run", fake_run(GH_OUT)):
             result = github("u", 50, ssh=True, source=False, no_archived=True)
         assert ("zed", "git@github.com:u/zed.git", ("agent", "cli")) in result
+
+    @pytest.mark.parametrize("limit", ["0", "-1"])
+    def test_main_rejects_bad_limit(self, db_path, limit):
+        with pytest.raises(SystemExit):
+            run(db_path, "github", "u", "-L", limit)
 
     def test_main_requires_gh(self, db_path):
         with (

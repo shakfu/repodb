@@ -12,7 +12,7 @@
     repodb status ~/src [--group] [filters]
     repodb remove OWNER/NAME [NAME ...] | --owner USER --all
     repodb info
-    repodb apply | review | publish | runs
+    repodb apply | review | publish | runs | template
 
 Filters are ``--owner USER``, ``-s SET`` and ``-t TOPIC [-t ...] [--any]``.
 Handlers print results, turn library exceptions into messages, and return the
@@ -66,8 +66,14 @@ class Console(logging.Handler):
         print(self.format(record), file=stream)
 
 
-def open_db(args: argparse.Namespace) -> GitRepoDB:
-    """Open ``args.db``, exiting with status 1 if its schema is unsupported."""
+def open_db(args: argparse.Namespace, create: bool = False) -> GitRepoDB:
+    """Open ``args.db``, exiting with status 1 if it is missing and not *create*,
+    or if its schema is unsupported."""
+    if not create and not args.db.is_file():
+        raise SystemExit(
+            f"no database at {args.db}; add projects with 'repodb scan',"
+            " 'repodb github USER' or 'repodb import JSON'"
+        )
     try:
         return GitRepoDB(args.db)
     except ValueError as e:
@@ -113,7 +119,7 @@ def print_all(items: Sequence[object]) -> None:
 def cmd_scan(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if not args.directory.is_dir():
         parser.error(f"not a directory: {args.directory}")
-    with open_db(args) as db:
+    with open_db(args, create=True) as db:
         print_all(db.add(scan(args.directory)))
     return 0
 
@@ -142,7 +148,7 @@ def cmd_github(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     except subprocess.CalledProcessError as e:
         print(f"gh failed: {e.stderr.strip()}", file=sys.stderr)
         return 1
-    with open_db(args) as db:
+    with open_db(args, create=True) as db:
         print_all(db.add_projects((n, u, list(t)) for n, u, t in projects))
     return 0
 
@@ -181,7 +187,7 @@ def report_refresh(db: GitRepoDB, args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    with open_db(args) as db:
+    with open_db(args, create=True) as db:
         try:
             print_all(import_projects(db, args.json))
         except (OSError, ValueError) as e:  # json.JSONDecodeError is a ValueError
@@ -203,7 +209,11 @@ def cmd_export(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     if str(args.output) == "-":
         sys.stdout.write(text)
     else:
-        args.output.write_text(text)
+        try:
+            args.output.write_text(text)
+        except OSError as e:
+            print(f"cannot write {args.output}: {e.strerror or e}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -466,8 +476,20 @@ def summary(run: ap.Run) -> str:
 
 
 def cmd_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    script, digest = None, None
+    if args.script is not None:
+        try:
+            # Read once, so the copy run is the one hashed.
+            script = args.script.read_bytes()
+            digest = ap.check_script(script)
+        except (OSError, ValueError) as e:
+            parser.error(f"{args.script}: {e}")
+    if args.repo and (args.set_name or args.topic or args.owner or args.all):
+        parser.error("-r names repos; it does not go with -s, -t, --owner or --all")
     try:
-        ap.check_change(args.exec, args.replace, args.glob or [])
+        ap.check_change(args.exec, args.replace, args.glob or [], digest)
+        if args.branch:
+            ap.check_branch(args.branch)
     except ValueError as e:
         parser.error(str(e))
     with hold(args, parser, create=True) as root:
@@ -478,10 +500,10 @@ def cmd_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 parser.error(
                     f"run {run.name!r} uses branch {run.branch!r}; it is fixed per run"
                 )
-            if args.exec is not None or args.replace:
-                change = (args.exec, args.replace, args.glob or [])
+            if args.exec is not None or args.replace or digest is not None:
+                change = (args.exec, args.replace, args.glob or [], digest)
             else:
-                change = (run.exec, run.replace, run.glob)
+                change = (run.exec, run.replace, run.glob, run.script)
             message = args.message or run.message
             if (*change, message) != run.change():
                 if args.redo is None:
@@ -491,18 +513,22 @@ def cmd_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                     )
                 run.set_change(message, *change)
         else:
-            if args.exec is None and not args.replace:
-                parser.error("a new run needs --exec or --replace")
+            if args.exec is None and not args.replace and digest is None:
+                parser.error("a new run needs --exec, --replace or --script")
             if not args.message:
                 parser.error("a new run needs -m MESSAGE")
-            run = ap.Run.create(
-                args.run,
-                args.message,
-                args.exec,
-                args.replace,
-                args.glob or [],
-                args.branch,
-            )
+            try:  # the default branch repodb/RUN can be invalid, e.g. for "a..b"
+                run = ap.Run.create(
+                    args.run,
+                    args.message,
+                    args.exec,
+                    args.replace,
+                    args.glob or [],
+                    args.branch,
+                    digest,
+                )
+            except ValueError as e:
+                parser.error(str(e))
         if args.repo or args.set_name or args.topic or args.owner or args.all:
             with open_db(args) as db:
                 try:
@@ -533,6 +559,8 @@ def cmd_apply(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             except ValueError as e:
                 print(e, file=sys.stderr)
                 return 1
+        if script is not None:
+            ap.install_script(root, script)
         ap.apply_run(run, root, args.jobs, args.timeout, on_done=report_line)
         print(f"run {run.name}: {summary(run)}; review with 'repodb review {run.name}'")
         return 1 if run.counts().get("failed") else 0
@@ -593,6 +621,11 @@ def cmd_publish(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
         )
         print(f"run {run.name}: {summary(run)}")
         return 1 if any(run.repos[s].error for s in tried) else 0
+
+
+def cmd_template(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    sys.stdout.write(ap.template(args.kind))
+    return 0
 
 
 def cmd_runs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -691,7 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-L",
         "--limit",
-        type=int,
+        type=positive,
         default=10000,
         help="maximum repos to list (default: 10000)",
     )
@@ -811,6 +844,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec", metavar="CMD", help="shell command run in each repo root"
     )
     change.add_argument(
+        "--script",
+        type=Path,
+        metavar="FILE",
+        help="executable run in each repo root; copied into the run"
+        " (starter: 'repodb template')",
+    )
+    change.add_argument(
         "--replace",
         nargs=2,
         metavar=("PATTERN", "REPL"),
@@ -828,7 +868,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-j", "--jobs", type=positive, default=1, help="repos at once (default: 1)"
     )
     p.add_argument(
-        "--timeout", type=positive, metavar="SECS", help="per-repo --exec limit"
+        "--timeout",
+        type=positive,
+        metavar="SECS",
+        help="per-repo limit for --exec or --script",
     )
     p.add_argument(
         "--redo",
@@ -857,13 +900,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("run", nargs="?", metavar="RUN")
     p.add_argument("--discard", action="store_true", help="delete the run's directory")
     p.add_argument("--workdir", type=Path, help="directory holding runs")
+
+    p = add("template", cmd_template, "print a starter script for apply --script")
+    p.add_argument("kind", choices=["sh", "py"], help="shell or Python")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     argv = sys.argv[1:] if argv is None else list(argv)
-    args = parser.parse_args(argv)
+    args, extra = parser.parse_known_args(argv)
+    # Python < 3.12 matches an empty SPEC... before an option, so
+    # `publish RUN --push-default SPEC` leaves SPEC over; it belongs to specs.
+    specs = getattr(args, "specs", None)
+    if extra and isinstance(specs, list) and not any(e.startswith("-") for e in extra):
+        specs += extra
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     # nargs="*" also takes stray words given without "--"; keep them from git.
     if getattr(args, "git_options", None) and "--" not in argv:
         parser.error(f"unrecognized arguments: {' '.join(args.git_options)}")

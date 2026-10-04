@@ -106,6 +106,7 @@ runs/bump-checkout/
   "message": "Bump actions/checkout to v4",
   "branch": "repodb/bump-checkout",
   "exec": null,
+  "script": null,
   "replace": ["actions/checkout@v\\d+", "actions/checkout@v4"],
   "glob": [".github/workflows/*.y*ml"],
   "repos": {
@@ -142,6 +143,18 @@ selected -> cloned -> unchanged                 (no diff; never published)
 - `apply` refuses to continue a run whose `--exec`, `--replace` or `-m` differs from the manifest, unless `--redo`. `--redo [SPEC ...]` resets those repos (all if none are given) to `selected`, and records the new change.
 
 - `publish` acts only on `committed`, and skips `published`, so it can be rerun too.
+
+## Scripts
+
+`apply --script FILE` copies FILE to `runs/RUN/script`, executable, and records its sha256 as `script`. Each repo runs that copy by absolute path, without a shell, so the `#!` line picks the interpreter.
+
+- A copy over the path: `--exec` runs in each clone, so a relative path to a script does not resolve, and an edit between runs would reach only the repos resumed after it.
+
+- The digest over the file's mtime: a resumed run with an edited FILE is a changed change and needs `--redo`. `apply RUN` without `--script` keeps the stored copy.
+
+- FILE is read once, so the copy run is the one hashed. A file without `#!` is refused before cloning, since it would fail in every repo.
+
+`repodb template sh|py` prints a starter. Both fail until edited, so an unedited template cannot commit anything. The Python one is stdlib only and is type-checked with the package.
 
 ## `apply`, per repo
 

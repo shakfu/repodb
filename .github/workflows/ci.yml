@@ -16,18 +16,21 @@ concurrency:
 
 jobs:
   qa:
-    name: QA (lint, typecheck, test)
+    name: QA (lint, typecheck, test) on ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install uv
+      # python-version sets UV_PYTHON, so every uv command below uses it.
+      - name: Install uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.13
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --dev
@@ -44,16 +47,11 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v
 
+  # Pure Python: one wheel serves every version, so build once.
   build:
-    name: Build (${{ matrix.os }}/${{ matrix.python-version }})
+    name: Build
     needs: qa
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.10", "3.13"]
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -62,43 +60,15 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Build wheel and sdist
+        run: uv build
 
-      - name: Install dependencies
-        run: uv sync
+      - name: Check distributions
+        run: uv run twine check dist/*
 
-      - name: Build wheel
-        run: uv build --wheel
-
-      - name: Run tests
-        run: uv run pytest tests/ -v
-
-      - name: Upload wheel artifact
+      - name: Upload distributions
         uses: actions/upload-artifact@v7
         with:
-          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: dist/*.whl
-          retention-days: 7
-
-  collect-artifacts:
-    name: Collect all artifacts
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: all-wheels
-          pattern: wheel-*
-          merge-multiple: true
-
-      - name: List collected wheels
-        run: ls -la all-wheels/
-
-      - name: Upload combined artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: all-wheels
-          path: all-wheels/
+          name: dist
+          path: dist/
           retention-days: 14

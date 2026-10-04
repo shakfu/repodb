@@ -15,6 +15,7 @@ functions return data and raise exceptions; progress is logged to the
 """
 
 import logging
+from importlib.metadata import PackageNotFoundError, version
 
 from repodb.apply import Repo, Run, apply_run, publish_run, runs_dir
 from repodb.cli import main
@@ -67,4 +68,7 @@ __all__ = [
     "status",
     "to_json",
 ]
-__version__ = "0.2.0"
+try:
+    __version__ = version("repodb")
+except PackageNotFoundError:  # run from a source tree without installing
+    __version__ = "unknown"

@@ -1,5 +1,6 @@
 """The library API: no printing, no argparse, results as data."""
 
+import importlib.metadata
 import json
 import logging
 import subprocess
@@ -40,6 +41,7 @@ def stored(remotes, db_path, monkeypatch):
 def test_public_api():
     assert all(hasattr(repodb, name) for name in repodb.__all__)
     assert repodb.main is repodb.cli.main
+    assert repodb.__version__ == importlib.metadata.version("repodb")
 
 
 def test_library_prints_nothing(stored, db_path, tmp_path, capsys):
@@ -134,7 +136,7 @@ def test_run_lifecycle(stored, db_path, tmp_path):
 @pytest.mark.parametrize(
     "exec_, replace, glob, message",
     [
-        ("true", ["a", "b"], ["x"], "not both"),
+        ("true", ["a", "b"], ["x"], "one of exec, replace or script"),
         (None, ["a", "b"], [], "go together"),
         (None, None, ["x"], "go together"),
         (None, ["(", "b"], ["x"], "replace pattern"),
@@ -149,13 +151,20 @@ def test_check_change(exec_, replace, glob, message):
 def test_run_create_validates():
     with pytest.raises(ValueError, match="invalid run name"):
         Run.create("a/b", "m", exec="true")
-    with pytest.raises(ValueError, match="needs exec or replace"):
+    with pytest.raises(ValueError, match="needs exec, replace or script"):
         Run.create("a", "m")
     with pytest.raises(ValueError, match="commit message"):
         Run.create("a", "", exec="true")
+    for branch in ["a..b", "-x", "x.lock", "@{-1}", "a b"]:
+        with pytest.raises(ValueError, match="invalid branch name"):
+            Run.create("a", "m", exec="true", branch=branch)
+    with pytest.raises(ValueError, match="invalid branch name 'repodb/a..b'"):
+        Run.create("a..b", "m", exec="true")
+    assert Run.create("a", "m", exec="true", branch="x/y").branch == "x/y"
 
 
 def test_cli_logging_is_scoped(db_path, capsys):
+    GitRepoDB(db_path).close()
     log = logging.getLogger("repodb")
     before = (list(log.handlers), log.level, log.propagate)
     run(db_path, "list")

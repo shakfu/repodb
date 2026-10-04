@@ -6,21 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-04
+
 ### Added
 
-- Runs have a lock and a format version. `apply`, `publish` and `runs --discard` hold `runs/.RUN.lock`; a second process on the same run exits with a message. Before, two processes each saved `run.json` from their own copy, so one silently dropped the other's results. `run.json` gains `"version": 1`. A newer version is refused, and unknown keys are ignored, so an added field stays readable by older releases.
+- `apply --script FILE` runs a script in each repo, and `repodb template sh|py` prints a starter that states the contract: exit status, environment, no commits. The script is copied into the run and its sha256 recorded, so an edit needs `--redo` and cannot reach only the repos resumed after it. Over `--exec`, which runs in each clone: a relative script path there does not resolve, as in the README's old `--exec 'python fix.py'` example. Scripts run by their `#!` line, so `.py` scripts use `python3`, not repodb's interpreter.
+
+- Runs have a lock and a format version. `apply`, `publish` and `runs --discard` hold `runs/.RUN.lock`; a second process on the same run exits with a message. Before, two processes each saved `run.json` from their own copy, so one silently dropped the other's results. `run.json` gains `"version": 1`. A newer version is refused, and unknown keys are ignored, so a later added field stays readable. 0.2.0 cannot read runs written by this release; this release reads 0.2.0 runs.
+
+### Changed
+
+- Commands that only read the database exit with a message when it is missing. Before, a mistyped `--db` created an empty database and its parent directory. `scan`, `github USER` and `import` still create it.
+
+- `apply -r SPEC` with `-s`, `-t`, `--owner` or `--all` is refused, as in `clone`. Before, the filters were silently ignored.
+
+- Linux and macOS only, now declared in the classifiers and README. `apply --exec` timeouts use POSIX process groups.
+
+- The README documents `apply`, `review`, `publish` and `runs` in full.
+
+- CI runs lint, type check and tests on Python 3.10 to 3.14, pinning each interpreter, and builds the wheel and sdist once.
 
 ### Fixed
-
-- `apply --all` or `--owner` that selects nothing now says so. Before, it exited 1 with no message.
-
-- Tests no longer read the user's git config. `commit.gpgsign = true` or a `url.insteadOf` rewrite made them fail.
 
 - `apply` and `publish`: one repo's unexpected error, such as an `OSError` or a missing `gh`, no longer aborts the run. Before, it stopped result collection, so repos already finished, possibly already pushed, were not saved to `run.json`, and queued work kept running. Now the error goes into that repo's state as `failed` (apply) or `committed` with the error (publish), and the traceback is logged.
 
 - `publish`: a retry no longer stays `committed` when an earlier publish opened the PR but did not record it, for example after a lost `gh` response. `gh pr create` then fails because the PR exists. On that failure, `publish` now records the open PR for the run's branch. The lookup runs only after a failure, so the normal path makes no extra `gh` call.
 
-## [0.2.0]
+- `publish` reads the `workflow` scope from gh's active github.com account only. Before, it matched `workflow` anywhere in `gh auth status`, so another account's scopes, or a login containing "workflow", passed the check. Falls back to the text output for a `gh` without `--json`.
+
+- On Python 3.10 and 3.11, a SPEC after an option was rejected, as in `publish RUN --push-default SPEC`. argparse there matches an empty `SPEC...` before the option. Affected `review`, `publish`, `set` and `remove`.
+
+- `apply` checks the branch name with `git check-ref-format --branch` before cloning, including the default `repodb/RUN`. Before, an invalid name, such as one from a run named `a..b`, failed in every repo after every clone, and a leading `-` reached git as an option.
+
+- `apply --all` or `--owner` that selects nothing now says so. Before, it exited 1 with no message.
+
+- `export -o` to an unwritable path prints an error, not a traceback.
+
+- `github -L` rejects values below 1.
+
+- `repodb.__version__` is read from the installed package metadata, so it cannot drift from `pyproject.toml`.
+
+- Tests no longer read the user's git config. `commit.gpgsign = true` or a `url.insteadOf` rewrite made them fail.
+
+## [0.2.0] - 2026-09-27
 
 ### Added
 

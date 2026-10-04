@@ -1,8 +1,10 @@
 """Tests for repodb.apply: apply, review, publish, runs."""
 
+import importlib.util
 import json
 import re
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -160,12 +162,18 @@ class TestApply:
             ["r", "--replace", "a", "b", "--glob", "../x", "-m", "m", "--all"],
             ["r", "--replace", "a", "b", "--glob", "/etc/*", "-m", "m", "--all"],
             ["r", "--exec", "true", "--replace", "a", "b", "-m", "m", "--all"],
+            ["r", *SHOUT, "--all", "--branch", "a..b"],
+            ["r", *SHOUT, "--all", "--branch", "-x"],
+            ["a..b", *SHOUT, "--all"],  # invalid default branch repodb/a..b
+            ["r", *SHOUT, "-r", "beta", "-s", "x"],  # -r goes alone
+            ["r", *SHOUT, "-r", "beta", "--all"],
         ],
     )
     def test_rejects_bad_arguments(self, stored, db_path, tmp_path, args):
         with pytest.raises(SystemExit):
             run(db_path, "apply", *args)
         assert not (runs(tmp_path) / "r").exists()
+        assert not (runs(tmp_path) / "a..b").exists()
 
     def test_unknown_selection(self, stored, db_path, tmp_path, capsys):
         assert run(db_path, "apply", "r", *SHOUT, "-r", "nope") == 1
@@ -176,9 +184,101 @@ class TestApply:
         assert not (runs(tmp_path) / "r").exists()
 
     def test_empty_database(self, db_path, tmp_path, capsys):
+        GitRepoDB(db_path).close()
         assert run(db_path, "apply", "r", *SHOUT, "--all") == 1
         assert "no projects; nothing to apply" in capsys.readouterr().err
         assert not (runs(tmp_path) / "r").exists()
+
+
+class TestScript:
+    def write(self, path, body):
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        return path
+
+    @pytest.mark.parametrize("kind, shebang", [("sh", "#!/bin/sh"), ("py", "#!/usr/")])
+    def test_template_command(self, db_path, capsys, kind, shebang):
+        assert run(db_path, "template", kind) == 0
+        assert capsys.readouterr().out == apply.template(kind)
+        assert apply.template(kind).startswith(shebang)
+
+    @pytest.mark.parametrize("kind", ["sh", "py"])
+    def test_unedited_template_fails(self, stored, db_path, tmp_path, kind):
+        script = tmp_path / f"change.{kind}"
+        script.write_text(apply.template(kind))
+        assert (
+            run(db_path, "apply", "t", "--script", script, "-m", "m", "-r", "beta") == 1
+        )
+        beta = load(tmp_path, "t").repos["alice/beta"]
+        assert beta.state == "failed"
+        log = runs(tmp_path) / "t" / "logs" / "alice__beta.log"
+        assert "replace this line with the change" in log.read_text()
+
+    def test_relative_paths_env_and_edits(
+        self, stored, db_path, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self.write(tmp_path / "s.sh", 'echo "$REPODB_OWNER/$REPODB_NAME v1" > who')
+        args = ["apply", "s", "--workdir", "w", "-m", "m", "-r", "beta"]
+        assert run(db_path, *args, "--script", "s.sh") == 0
+        root = tmp_path / "w" / "s"
+        beta = Run.load(root).repos["alice/beta"]
+        assert (beta.state, beta.files) == ("committed", ["who"])
+        assert (root / "repos/alice/beta/who").read_text() == "alice/beta v1\n"
+        assert (root / "script").read_bytes() == (tmp_path / "s.sh").read_bytes()
+        assert Run.load(root).script == apply.check_script(
+            (root / "script").read_bytes()
+        )
+
+        # An edited script is a changed change; the stored copy is unchanged.
+        self.write(tmp_path / "s.sh", 'echo "$REPODB_NAME v2" > who')
+        with pytest.raises(SystemExit):
+            run(db_path, *args, "--script", "s.sh")
+        assert "add --redo" in capsys.readouterr().err
+        assert b"v1" in (root / "script").read_bytes()
+        assert run(db_path, "apply", "s", "--workdir", "w") == 0  # resumes with v1
+        assert run(db_path, *args, "--script", "s.sh", "--redo") == 0
+        assert (root / "repos/alice/beta/who").read_text() == "beta v2\n"
+
+    def test_rejects_bad_script(self, stored, db_path, tmp_path, capsys):
+        bare_script = tmp_path / "s.sh"
+        bare_script.write_text("echo hi\n")
+        for extra in [[bare_script], [tmp_path / "missing"]]:
+            with pytest.raises(SystemExit):
+                run(db_path, "apply", "s", "-m", "m", "--all", "--script", *extra)
+        with pytest.raises(SystemExit):
+            script = self.write(tmp_path / "ok.sh", "true")
+            run(
+                db_path,
+                "apply",
+                "s",
+                "-m",
+                "m",
+                "--all",
+                "--script",
+                script,
+                "--exec",
+                "true",
+            )
+        assert "#! line" in capsys.readouterr().err
+        assert not (runs(tmp_path) / "s").exists()
+
+    def test_check_change_one_kind(self):
+        with pytest.raises(ValueError, match="one of exec, replace or script"):
+            apply.check_change("true", None, [], "abc")
+
+
+def test_python_template_substitute_keeps_line_endings(tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "change", Path(apply.__file__).parent / "templates" / "change.py"
+    )
+    assert spec is not None and spec.loader is not None
+    change = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(change)
+    f = tmp_path / "a.txt"
+    f.write_bytes(b"old\r\nold\r\n")
+    assert change.substitute(f, "old", "new") == 2
+    assert f.read_bytes() == b"new\r\nnew\r\n"
+    assert change.substitute(tmp_path / "missing", "old", "new") == 0
 
 
 class TestRunAdd:
@@ -316,7 +416,7 @@ class TestPublish:
                 return real(cmd, *a, **kw)
             calls.append(cmd)
             out = (
-                "Token scopes: 'repo'"
+                json.dumps({"hosts": {"github.com": [{"scopes": "repo"}]}})
                 if cmd[1] == "auth"
                 else "https://github.com/alice/alpha/pull/7\n"
             )
@@ -407,6 +507,39 @@ class TestPublish:
         assert "gh auth refresh -s workflow" in capsys.readouterr().err
         assert [c[1] for c in github] == ["auth"]
         assert head(bare(tmp_path, "alice", "alpha"), "repodb/w") is None
+
+
+def gh_auth(json_out, text_out=""):
+    """Fake subprocess.run for `gh auth status`; *json_out* "" means no --json."""
+
+    def fake(cmd, *a, **kw):
+        if "--json" in cmd:
+            if not json_out:
+                return subprocess.CompletedProcess(cmd, 1, "", "unknown flag: --json")
+            return subprocess.CompletedProcess(cmd, 0, json_out, "")
+        return subprocess.CompletedProcess(cmd, 0, text_out, "")
+
+    return patch("repodb.apply.subprocess.run", fake)
+
+
+def accounts(*scopes):
+    hosts = [{"login": "workflow-bot", "scopes": s} for s in scopes]
+    return json.dumps({"hosts": {"github.com": hosts}})
+
+
+@pytest.mark.parametrize(
+    "json_out, text_out, expected",
+    [
+        (accounts("repo, workflow"), "", True),
+        (accounts("repo, read:org"), "", False),  # "workflow" only in the login
+        (accounts(""), "", False),
+        ("", "Token scopes: 'repo', 'workflow'", True),
+        ("", "Token scopes: 'repo'", False),
+    ],
+)
+def test_has_workflow_scope(json_out, text_out, expected):
+    with gh_auth(json_out, text_out):
+        assert apply.has_workflow_scope() is expected
 
 
 class TestRuns:

@@ -1,6 +1,6 @@
 [project]
 name = "repodb"
-version = "0.2.0"
+version = "0.3.0"
 description = "Keep a SQLite database of git project clone URLs; clone, compare and change the projects in bulk"
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,6 +13,8 @@ keywords = ["git", "github", "sqlite", "clone", "cli"]
 dependencies = []
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
