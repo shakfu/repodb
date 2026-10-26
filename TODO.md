@@ -22,6 +22,12 @@
 
 - [ ] Run one manual `publish` in PR mode against a scratch GitHub repo. PR mode is tested only with `gh` mocked.
 
+- [ ] `status` reports git state per clone: `dirty`, `ahead N`, `behind N`, `detached`, from one `git status --porcelain=v2 --branch` call. Today it checks only presence, `.git`, and origin. Read-only half of the next item, so it can ship first.
+
+- [ ] `clone --update` fast-forwards clones that exist instead of skipping them: verify origin matches the stored url, `git fetch --prune`, refuse a dirty worktree, `pull --ff-only` only when behind and not ahead. Any other state (ahead, diverged, dirty, detached) is reported and left alone, matching `publish`'s refusal to rebase. No `reset` or `rebase` strategy; repodb has no destructive operations. Alternative: `repodb list` piped to `xargs git pull --ff-only`, which loses the per-repo report.
+
+- [ ] `refresh --prune` confirms each unlisted repo with `gh api repos/OWNER/NAME` before marking it prunable. Only a 404 is prunable; 403, network errors and other failures are reported as unclear and never pruned. A 301 means renamed or transferred: report `renamed to FULL_NAME` instead. The listing-completeness guard (`partial`) stays as the first filter, so the normal path makes no extra calls. Closes a hole: a renamed repo is unlisted under its old name and is marked prunable today.
+
 ## Low
 
 - [x] L1. `export -o` to an unwritable path prints a traceback (`cli.py:205`).
