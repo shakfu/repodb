@@ -692,9 +692,47 @@ class Refresh:
     checked: int = 0  # github.com projects considered
     changes: list[Change] = field(default_factory=list)
     unlisted: list[Row] = field(default_factory=list)  # gh did not list them
-    prunable: list[Row] = field(default_factory=list)  # unlisted, owner fully listed
+    prunable: list[Row] = field(default_factory=list)  # unlisted, confirmed gone
+    kept: dict[Row, str] = field(default_factory=dict)  # unlisted -> why not prunable
     partial: dict[str, int] = field(default_factory=dict)  # owner -> repos listed
     failed: dict[str, str] = field(default_factory=dict)  # owner -> gh error
+
+
+def gh_api(path: str) -> str | int:
+    """Return ``gh api PATH --jq .full_name // .login``, or the HTTP status of a
+    failure (0 if gh gives none)."""
+    r = subprocess.run(
+        ["gh", "api", path, "--jq", ".full_name // .login"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode == 0:
+        return r.stdout.strip()
+    m = re.search(r"HTTP (\d{3})", r.stderr)
+    return int(m[1]) if m else 0
+
+
+def confirm_gone(slug: str, login: str | None) -> str | None:
+    """Return why repo *slug* may still exist, or None if it is gone.
+
+    GitHub answers 404 for a private repo the token cannot see, so a 404 is
+    trusted only for the token owner's own repos. A renamed or transferred
+    repo redirects to its new full name.
+    """
+    got = gh_api(f"repos/{slug}")
+    if isinstance(got, str):
+        if got.lower() != slug.lower():
+            return f"renamed to {got}"
+        return "exists, but gh did not list it"
+    if got != 404:
+        return f"gh api failed (HTTP {got})" if got else "gh api failed"
+    if login is not None and login.lower() == slug.partition("/")[0].lower():
+        return None
+    return (
+        "not found; a private repo this token cannot see is not found either;"
+        " remove it with 'repodb remove' if it is gone"
+    )
 
 
 def refresh(db: GitRepoDB, owner: str | None = None, limit: int = 10000) -> Refresh:
@@ -702,8 +740,9 @@ def refresh(db: GitRepoDB, owner: str | None = None, limit: int = 10000) -> Refr
 
     Projects are matched by the repo name in their url, since `scan` stores
     the directory name. A project gh does not list is ``prunable`` only if its
-    owner's listing is complete: an empty listing can mean lost access, and one
-    of *limit* repos can be truncated.
+    owner's listing is complete, since an empty listing can mean lost access
+    and one of *limit* repos can be truncated, and `confirm_gone` confirms it.
+    Otherwise it is in ``kept`` with the reason.
     """
     rows = [r for r in db.rows(owner) if host_of(r[2]) == "github.com"]
     result = Refresh(checked=len(rows))
@@ -718,15 +757,25 @@ def refresh(db: GitRepoDB, owner: str | None = None, limit: int = 10000) -> Refr
         if not repos or len(repos) >= limit:
             result.partial[o] = len(repos)
     topics = {}
+    login: str | None = None
     for o, n, u in rows:
         if (repos_of := listed.get(o.lower())) is None:
             continue
         if (t := repos_of.get(repo_of(u).lower())) is not None:
             topics[n, u] = t
+            continue
+        row = (o, n, u)
+        result.unlisted.append(row)
+        if o.lower() in result.partial:
+            continue
+        if login is None:  # asked once, and only when a repo is unlisted
+            got = gh_api("user")
+            login = got if isinstance(got, str) else ""
+        why = confirm_gone(f"{owner_of(u)}/{repo_of(u)}", login or None)
+        if why is None:
+            result.prunable.append(row)
         else:
-            result.unlisted.append((o, n, u))
-            if o.lower() not in result.partial:
-                result.prunable.append((o, n, u))
+            result.kept[row] = why
     result.changes = db.add(list(topics), topics)
     return result
 

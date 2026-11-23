@@ -171,8 +171,9 @@ def report_refresh(db: GitRepoDB, args: argparse.Namespace) -> int:
     prune = r.prunable if args.prune else []
     for row in r.unlisted:
         if row not in prune:
+            why = f" ({r.kept[row]})" if row in r.kept else ""
             print(
-                f"not listed by gh, topics unchanged: {row[0]}/{row[1]}",
+                f"not listed by gh, topics unchanged: {row[0]}/{row[1]}{why}",
                 file=sys.stderr,
             )
     print_all(r.changes)

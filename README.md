@@ -25,6 +25,8 @@ repodb import projects.json
 repodb remove OWNER/NAME [NAME ...] | --owner USER --all
 ```
 
+- `--prune` lists a repo for removal only when GitHub confirms it is gone: `gh api` answers 404, and the repo belongs to the `gh` login. GitHub also answers 404 for a private repo the token cannot see, so other owners' repos are reported but not removed. A renamed repo is reported with its new name.
+
 ### Select projects
 
 `list`, `export`, `clone`, `status` and `apply` take the same filters. A project must match all of them.
@@ -270,4 +272,5 @@ Functions return data and raise exceptions. Progress goes to the `repodb` logger
 
 ```sh
 make qa     # ruff lint and format check, mypy, pytest
+scripts/smoke-github.sh  # publish and prune against real GitHub, in two private scratch repos
 ```

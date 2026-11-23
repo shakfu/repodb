@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- `github --refresh --prune` confirms each unlisted repo with `gh api` before listing it for removal. Before, a repo was prunable whenever its owner's listing omitted it, so a renamed repo, or a private one the account lost access to, was removed with its set memberships, which cannot be fetched again. A 404 is trusted only for the `gh` login's own repos, because GitHub answers 404 for a private repo the token cannot see. Storing each repo's visibility would also allow pruning other owners' public repos, at the cost of a schema change. Kept repos are reported with the reason, including a rename's new name, and are not removed. `Refresh.kept` holds the reasons.
+
 ### Fixed
 
 - `publish` after `apply --redo` failed to push in PR mode if an earlier `publish` had pushed the branch, for example before `gh pr create` failed. The redone commit does not descend from the pushed one, so every retry was rejected as non-fast-forward. Each repo now records the commit it pushed, and later pushes use `--force-with-lease` on that commit, over `--force`, so a commit someone else added to the branch is not overwritten.

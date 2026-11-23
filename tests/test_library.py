@@ -95,6 +95,12 @@ def test_refresh_reports_and_removes_nothing(db_path):
         )
 
         def gh(cmd, **kw):
+            if cmd[:3] == ["gh", "api", "user"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="alice\n")
+            if cmd[:2] == ["gh", "api"]:  # alice/gone
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "gh: Not Found (HTTP 404)"
+                )
             listing = {
                 "alice": [
                     {"name": "a", "url": "u", "repositoryTopics": [{"name": "x"}]}
@@ -112,6 +118,7 @@ def test_refresh_reports_and_removes_nothing(db_path):
             ("bob", "b", "https://github.com/bob/b"),
         ]
         assert r.prunable == [("alice", "gone", "https://github.com/alice/gone")]
+        assert r.kept == {}
         assert r.partial == {"bob": 0}
         assert len(db.rows()) == 4
 
