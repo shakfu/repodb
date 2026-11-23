@@ -140,6 +140,9 @@ def test_run_lifecycle(stored, db_path, tmp_path):
         (None, ["a", "b"], [], "go together"),
         (None, None, ["x"], "go together"),
         (None, ["(", "b"], ["x"], "replace pattern"),
+        (None, ["(a)", r"\2"], ["x"], "replacement"),
+        (None, ["(?P<n>a)", r"\g<m>"], ["x"], "replacement"),
+        (None, ["a", "\\q"], ["x"], "replacement"),
         (None, ["a", "b"], ["../x"], "inside the repo"),
     ],
 )

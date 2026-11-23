@@ -64,7 +64,7 @@ repodb status DEST [-g]                   # compare DEST with the database
 
 - `clone` skips targets that exist. `-j N` runs N clones at once.
 
-- `status` prints `missing`, `untracked`, `differs`, `not a git repo` or `no origin` per project, and exits 1 if it prints anything.
+- `status` prints `missing`, `untracked`, `differs`, `not a git repo` or `no origin` per project, and exits 1 if it prints anything. An origin naming the stored repo in another url form, such as SSH for HTTPS, is not `differs`.
 
 ### Change many repos
 
@@ -210,7 +210,7 @@ repodb publish RUN --push-default         # push the commit to the default branc
 - PR mode needs [`gh`](https://cli.github.com) and a github.com url. Other hosts need `--push-default`.
 - Before pushing, `publish` fetches the default branch. If it moved since `apply`, the repo is refused with `redo SPEC`: rebasing could hide a conflict.
 - A failed push or PR keeps the repo `committed` with the error, so a rerun retries it. If a PR for the branch already exists, it is recorded.
-- Changes under `.github/workflows/` pushed over HTTPS need the token's `workflow` scope. `publish` checks first and stops with `gh auth refresh -s workflow`.
+- Changes under `.github/workflows/` pushed over HTTPS need the token's `workflow` scope. `publish` checks first and stops with `gh auth refresh -s workflow`. The check needs a `gh` with `gh auth status --json`.
 - `-j` defaults to 1, since GitHub rate-limits PR creation.
 - `publish` exits 1 if any repo failed.
 
@@ -235,7 +235,7 @@ The JSON form is `{name: url}`, or with `-g` `{owner: {name: url}}`. A project w
 
 The flat forms refuse a name held by two owners, ignoring case; use `-g`.
 
-The database defaults to `~/.local/share/repodb/repos.sqlite`; override with `--db`. Runs are kept in `runs/` next to it.
+The database defaults to `~/.local/share/repodb/repos.sqlite`; override with `--db`. Runs are kept in `runs/` next to it. A 0.1.x database is migrated by the first command that opens it, after a copy to `<db>.0.1.bak`.
 
 ## Library
 

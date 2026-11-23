@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `publish` after `apply --redo` failed to push in PR mode if an earlier `publish` had pushed the branch, for example before `gh pr create` failed. The redone commit does not descend from the pushed one, so every retry was rejected as non-fast-forward. Each repo now records the commit it pushed, and later pushes use `--force-with-lease` on that commit, over `--force`, so a commit someone else added to the branch is not overwritten.
+
+- Ctrl-C during `apply --exec` or `--script` waited for running commands to finish. Each command runs in its own session for `--timeout`, so the terminal's interrupt did not reach it. Running commands are now killed on interrupt; their repos keep their earlier state and are retried by the next `apply`.
+
+- `status` reported `differs` for an origin naming the stored repo in another url form, such as SSH for HTTPS. Rows are identified by host and path, so it now compares those.
+
+- `apply --replace` with an invalid replacement, such as `\2` with one group, failed in every repo after cloning. It is now refused before the run starts.
+
+- `publish` checked the `workflow` scope only for urls starting `https://github.com/`, so `https://user@github.com/...` skipped it. Without `gh auth status --json`, it read scopes from text output, which lists other accounts too. It now stops and asks to upgrade `gh`, over guessing.
+
+### Removed
+
+- The PyPy classifier, which CI does not test, and the Windows branch of the run lock, since `apply` is POSIX only.
+
 ## [0.3.0] - 2026-10-04
 
 ### Added

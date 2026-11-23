@@ -6,7 +6,7 @@
 
 .PHONY: all sync build rebuild test lint lint-check format format-check \
         typecheck qa clean distclean wheel sdist dist check publish-test \
-        publish upgrade coverage coverage-html docs release help
+        publish upgrade coverage coverage-html release help
 
 # Default target
 all: build
@@ -86,11 +86,6 @@ coverage-html:
 	@uv run pytest tests/ -v --cov=src/repodb --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
 
-# Build documentation (sphinx is fetched on demand; add it to the dev group
-# to pin a version)
-docs:
-	@uv run --with sphinx sphinx-build -b html docs/ docs/_build/html
-
 # Create a release (bump version, tag, push)
 release:
 	@echo "Current version: $$(grep '^version' pyproject.toml | head -1)"
@@ -139,7 +134,6 @@ help:
 	@echo "  upgrade      - Upgrade all dependencies"
 	@echo "  coverage     - Run tests with coverage"
 	@echo "  coverage-html - Generate HTML coverage report"
-	@echo "  docs         - Build documentation with Sphinx"
 	@echo "  release      - Bump version, tag, and prepare release"
 	@echo "  clean        - Remove build artifacts"
 	@echo "  distclean    - Remove all generated files"

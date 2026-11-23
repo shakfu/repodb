@@ -21,6 +21,7 @@ is `repodb.cli`.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import json
 import logging
@@ -29,7 +30,7 @@ import re
 import shutil
 import signal
 import subprocess
-import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -49,6 +50,11 @@ RUN_VERSION = 1  # of run.json; raise on a change older code would misread
 
 OnDone = Callable[[str, "Repo"], None]
 
+# Commands `run_exec` is waiting on. Each has its own session, so the terminal's
+# Ctrl-C does not reach it; `parallel` kills them on interrupt.
+_live: set[subprocess.Popen[bytes]] = set()
+_live_lock = threading.Lock()
+
 
 class Failed(Exception):
     """A step failed for one repo; the message is recorded in the run."""
@@ -64,25 +70,13 @@ def known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k in names}
 
 
-if sys.platform == "win32":
-    import msvcrt
-
-    def try_lock(f: IO[str]) -> bool:
-        try:
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
-
-else:
-    import fcntl
-
-    def try_lock(f: IO[str]) -> bool:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        return True
+def try_lock(f: IO[str]) -> bool:
+    """Take an exclusive lock on *f* without blocking; return whether it was taken."""
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
 
 
 @contextmanager
@@ -98,7 +92,6 @@ def locked(root: Path) -> Iterator[None]:
     """
     root.parent.mkdir(parents=True, exist_ok=True)
     with (root.parent / f".{root.name}.lock").open("a+") as f:
-        f.seek(0)  # msvcrt locks from the file position
         if not try_lock(f):
             raise Locked(f"run {root.name!r} is in use by another process")
         yield  # the lock is released when f closes
@@ -153,9 +146,27 @@ def check_change(
         if len(replace) != 2:
             raise ValueError("replace is [pattern, replacement]")
         try:
-            re.compile(replace[0])
+            pattern = re.compile(replace[0])
         except re.error as e:
             raise ValueError(f"replace pattern: {e}") from e
+        check_replacement(pattern, replace[1])
+
+
+def check_replacement(pattern: re.Pattern[str], repl: str) -> None:
+    """Raises ValueError unless *repl* is a valid replacement for *pattern*.
+
+    `re` parses a replacement only on a match, so expand it against an empty
+    match of a pattern with the same groups.
+    """
+    names = {i: n for n, i in pattern.groupindex.items()}
+    groups = "".join(
+        f"(?P<{names[i]}>)" if i in names else "()"
+        for i in range(1, pattern.groups + 1)
+    )
+    try:
+        re.compile(groups).match("").expand(repl)  # type: ignore[union-attr]
+    except (re.error, IndexError) as e:
+        raise ValueError(f"replace replacement: {e}") from e
 
 
 def runs_dir(db_path: Path) -> Path:
@@ -201,6 +212,7 @@ class Repo:
     matches: dict[str, int] = field(default_factory=dict)
     error: str | None = None
     pr: str | None = None
+    pushed: str | None = None  # commit last pushed to the run's branch; kept by redo
 
 
 @dataclass
@@ -352,7 +364,7 @@ class Run:
         if published := [s for s in slugs if self.repos[s].state == "published"]:
             raise ValueError(f"already published: {', '.join(published)}")
         for s in slugs:
-            self.repos[s] = Repo(url=self.repos[s].url)
+            self.repos[s] = Repo(url=self.repos[s].url, pushed=self.repos[s].pushed)
 
     def counts(self) -> dict[str, int]:
         """Return the number of repos in each state, in `STATES` order."""
@@ -421,23 +433,36 @@ def run_exec(
         Failed: on a non-zero exit or timeout.
     """
     # A new session, so a timeout can kill the command's children too.
-    proc = subprocess.Popen(
-        cmd,
-        shell=isinstance(cmd, str),
-        cwd=cwd,
-        env=env,
-        stdout=out,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    with _live_lock:
+        proc = subprocess.Popen(
+            cmd,
+            shell=isinstance(cmd, str),
+            cwd=cwd,
+            env=env,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        _live.add(proc)
     try:
         rc = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        kill(proc)
         proc.wait()
         raise Failed(f"exec timed out after {timeout}s") from None
+    finally:
+        with _live_lock:
+            _live.discard(proc)
     if rc:
         raise Failed(f"exec exited {rc}; see {out.name}")
+
+
+def kill(proc: subprocess.Popen[bytes]) -> None:
+    """Kill *proc*'s process group, if it still exists."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def prepare(run: Run, slug: str, url: str, root: Path, timeout: int | None) -> Repo:
@@ -532,7 +557,11 @@ def publish_one(
         if push_default:
             git(d, "push", "-q", "origin", f"{run.branch}:{default}")
         else:
-            git(d, "push", "-q", "origin", run.branch)
+            # A redone commit does not descend from the pushed one. The lease
+            # replaces only that commit, never one someone else added.
+            lease = [f"--force-with-lease={run.branch}:{repo.pushed}"]
+            git(d, "push", "-q", *(lease if repo.pushed else []), "origin", run.branch)
+            new.pushed = repo.commit
             subject, _, body = run.message.partition("\n")
             where = ["--repo", f"{owner_of(repo.url)}/{repo_of(repo.url)}"]
             where += ["--base", default, "--head", run.branch]
@@ -576,6 +605,9 @@ def parallel(
         for f in as_completed(futures):
             done(futures[f], f.result())
     except BaseException:  # Ctrl-C, or an error in *done*
+        with _live_lock:
+            for proc in _live:
+                kill(proc)
         pool.shutdown(cancel_futures=True)
         raise
     pool.shutdown()
@@ -617,7 +649,10 @@ def apply_run(
         run,
         root,
         slugs,
-        lambda s: prepare(run, s, run.repos[s].url, root, timeout),
+        lambda s: dataclasses.replace(
+            prepare(run, s, run.repos[s].url, root, timeout),
+            pushed=run.repos[s].pushed,
+        ),
         jobs,
         on_done,
     )
@@ -630,14 +665,20 @@ def needs_workflow_scope(run: Run, slugs: Iterable[str]) -> bool:
     GitHub rejects such a push unless the token has the ``workflow`` scope.
     """
     return any(
-        run.repos[s].url.startswith("https://github.com/")
+        run.repos[s].url.lower().startswith("https://")
+        and host_of(run.repos[s].url) == "github.com"
         and any(f.startswith(".github/workflows/") for f in run.repos[s].files)
         for s in slugs
     )
 
 
 def has_workflow_scope() -> bool:
-    """True if gh's active github.com account has the ``workflow`` scope."""
+    """True if gh's active github.com account has the ``workflow`` scope.
+
+    Raises:
+        RuntimeError: if ``gh auth status --json`` gives no scopes, e.g. an
+            older gh without ``--json``.
+    """
     cmd = ["gh", "auth", "status", "--hostname", "github.com", "--active"]
     r = subprocess.run(
         [*cmd, "--json", "hosts"], capture_output=True, text=True, check=False
@@ -645,9 +686,12 @@ def has_workflow_scope() -> bool:
     try:
         accounts = json.loads(r.stdout)["hosts"]["github.com"]
         scopes = {s.strip() for a in accounts for s in a["scopes"].split(",")}
-    except (ValueError, KeyError, TypeError, AttributeError):  # gh without --json
-        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return "'workflow'" in r.stdout + r.stderr
+    except (ValueError, KeyError, TypeError, AttributeError):
+        # Text output names other accounts' scopes too; do not guess.
+        raise RuntimeError(
+            "cannot read gh token scopes with 'gh auth status --json';"
+            " upgrade gh, or log in with 'gh auth login'"
+        ) from None
     return "workflow" in scopes
 
 

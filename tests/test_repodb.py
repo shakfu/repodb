@@ -1454,6 +1454,15 @@ class TestStatus:
             "untracked: carol",
         ]
 
+    def test_same_repo_other_url_form(self, stored, db_path, tmp_path, capsys):
+        """An origin naming the stored repo in another form is not a difference."""
+        d = tmp_path / "d"
+        assert run(db_path, "clone", "-r", "alice/beta", d) == 0
+        set_origin(d / "beta", "git@git.example.com:Alice/beta")
+        capsys.readouterr()
+        assert run(db_path, "status", "--owner", "alice", d) == 1
+        assert capsys.readouterr().out.splitlines() == ["missing: alpha"]
+
     def test_flat(self, stored, db_path, tmp_path, capsys):
         d = tmp_path / "d"
         assert run(db_path, "clone", "--owner", "alice", d) == 0

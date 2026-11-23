@@ -499,6 +499,69 @@ class TestPublish:
         a = load(tmp_path, "s").repos["alice/alpha"]
         assert (a.state, a.pr) == ("committed", None)
 
+    def pushed_then_pr_fails(self, github, db_path, tmp_path):
+        """Apply and publish alpha; the branch is pushed, then gh pr create fails."""
+        run(db_path, "apply", "s", *SHOUT, "-r", "alpha")
+        fake = subprocess.run  # the github fixture's fake
+
+        def fails(cmd, *a, **kw):
+            if cmd[:2] == ["gh", "pr"]:
+                out = "" if cmd[2] == "list" else "x"
+                return subprocess.CompletedProcess(cmd, cmd[2] != "list", out, "denied")
+            return fake(cmd, *a, **kw)
+
+        with patch("repodb.apply.subprocess.run", fails):
+            assert run(db_path, "publish", "s") == 1
+        a = load(tmp_path, "s").repos["alice/alpha"]
+        assert a.state == "committed"
+        assert head(bare(tmp_path, "alice", "alpha"), "repodb/s") == a.commit
+        return a
+
+    def test_redo_after_pushed_branch(self, github, db_path, tmp_path):
+        first = self.pushed_then_pr_fails(github, db_path, tmp_path)
+        assert first.pushed == first.commit
+        # The redone commit does not descend from the pushed one.
+        assert run(db_path, "apply", "s", "-m", "Other", "--redo", "alpha") == 0
+        redone = load(tmp_path, "s").repos["alice/alpha"]
+        assert redone.commit != first.commit and redone.pushed == first.commit
+        assert run(db_path, "publish", "s") == 0
+        a = load(tmp_path, "s").repos["alice/alpha"]
+        assert a.state == "published"
+        assert head(bare(tmp_path, "alice", "alpha"), "repodb/s") == a.commit
+
+    def test_redo_keeps_others_branch_commits(self, github, db_path, tmp_path):
+        """A commit someone else added to the pushed branch is not overwritten."""
+        self.pushed_then_pr_fails(github, db_path, tmp_path)
+        other = tmp_path / "other"
+        git(
+            "clone",
+            "-q",
+            "-b",
+            "repodb/s",
+            "https://github.com/alice/alpha.git",
+            str(other),
+        )
+        (other / "more").write_text("x")
+        git("-C", str(other), "add", ".")
+        git("-C", str(other), "commit", "-qm", "more")
+        git("-C", str(other), "push", "-q")
+        theirs = head(bare(tmp_path, "alice", "alpha"), "repodb/s")
+        assert run(db_path, "apply", "s", "-m", "Other", "--redo", "alpha") == 0
+        assert run(db_path, "publish", "s") == 1
+        a = load(tmp_path, "s").repos["alice/alpha"]
+        assert a.state == "committed" and "git push" in a.error
+        assert head(bare(tmp_path, "alice", "alpha"), "repodb/s") == theirs
+
+    def test_workflow_scope_unreadable(self, github, db_path, tmp_path, capsys):
+        cmd = "mkdir -p .github/workflows && echo x > .github/workflows/ci.yml"
+        run(db_path, "apply", "w", "--exec", cmd, "-m", "m", "-r", "alpha")
+        capsys.readouterr()
+        err = RuntimeError("upgrade gh")
+        with patch("repodb.apply.has_workflow_scope", side_effect=err):
+            assert run(db_path, "publish", "w") == 1
+        assert "upgrade gh" in capsys.readouterr().err
+        assert head(bare(tmp_path, "alice", "alpha"), "repodb/w") is None
+
     def test_workflow_scope_checked(self, github, db_path, tmp_path, capsys):
         cmd = "mkdir -p .github/workflows && echo x > .github/workflows/ci.yml"
         run(db_path, "apply", "w", "--exec", cmd, "-m", "m", "-r", "alpha")
@@ -533,13 +596,36 @@ def accounts(*scopes):
         (accounts("repo, workflow"), "", True),
         (accounts("repo, read:org"), "", False),  # "workflow" only in the login
         (accounts(""), "", False),
-        ("", "Token scopes: 'repo', 'workflow'", True),
-        ("", "Token scopes: 'repo'", False),
     ],
 )
 def test_has_workflow_scope(json_out, text_out, expected):
     with gh_auth(json_out, text_out):
         assert apply.has_workflow_scope() is expected
+
+
+def test_has_workflow_scope_needs_json():
+    """Without `gh auth status --json`, the scopes cannot be read reliably."""
+    with (
+        gh_auth("", "Token scopes: 'repo', 'workflow'"),
+        pytest.raises(RuntimeError, match="upgrade gh"),
+    ):
+        apply.has_workflow_scope()
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/a/r.git", True),
+        ("https://user@GitHub.com/a/r", True),
+        ("git@github.com:a/r.git", False),
+        ("ssh://git@github.com/a/r", False),
+        ("https://gitlab.com/a/r", False),
+    ],
+)
+def test_needs_workflow_scope(url, expected):
+    run = Run.create("w", "m", exec="true")
+    run.repos["a/r"] = apply.Repo(url=url, files=[".github/workflows/ci.yml"])
+    assert apply.needs_workflow_scope(run, ["a/r"]) is expected
 
 
 class TestRuns:
@@ -604,3 +690,23 @@ class TestRuns:
         with pytest.raises(SystemExit):
             run(db_path, "publish", "nope")
         assert not (runs(tmp_path) / "nope").exists()
+
+
+def test_interrupt_kills_running_commands(tmp_path):
+    """Ctrl-C does not wait for a command in its own session to finish."""
+    import time
+
+    def work(slug):
+        if slug == "slow":
+            with (tmp_path / "log").open("w") as out:
+                apply.run_exec("sleep 30", tmp_path, {}, out, None)
+        return apply.Repo(url="u")
+
+    def done(slug, repo):
+        time.sleep(0.5)  # let "slow" start
+        raise KeyboardInterrupt
+
+    start = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        apply.parallel(["fast", "slow"], work, 2, done)
+    assert time.monotonic() - start < 10

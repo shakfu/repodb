@@ -935,7 +935,8 @@ def status(
             found.append(Difference("not a git repo", str(r)))
         elif (origin := origin_of(target)) is None:
             found.append(Difference("no origin", str(r)))
-        elif origin != url:
+        # The same repo in another url form, e.g. ssh for https, matches.
+        elif url_key(origin) != url_key(url):
             found.append(
                 Difference("differs", str(r), f"origin {origin}, stored {url}")
             )

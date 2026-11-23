@@ -605,17 +605,19 @@ def cmd_publish(args: argparse.Namespace, parser: argparse.ArgumentParser) -> in
             parser.error(
                 "PR mode needs the gh CLI: https://cli.github.com; or --push-default"
             )
-        if (
-            gh is not None
-            and ap.needs_workflow_scope(run, todo)
-            and not ap.has_workflow_scope()
-        ):
-            print(
-                "changes touch .github/workflows/ but the gh token lacks the 'workflow'"
-                " scope; run 'gh auth refresh -s workflow'",
-                file=sys.stderr,
-            )
-            return 1
+        if gh is not None and ap.needs_workflow_scope(run, todo):
+            try:
+                has_scope = ap.has_workflow_scope()
+            except RuntimeError as e:
+                print(f"changes touch .github/workflows/; {e}", file=sys.stderr)
+                return 1
+            if not has_scope:
+                print(
+                    "changes touch .github/workflows/ but the gh token lacks the"
+                    " 'workflow' scope; run 'gh auth refresh -s workflow'",
+                    file=sys.stderr,
+                )
+                return 1
         tried = ap.publish_run(
             run, root, todo, args.push_default, args.draft, args.jobs, report_line
         )
